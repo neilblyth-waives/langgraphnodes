@@ -1,0 +1,177 @@
+version: '3.8'
+
+services:
+  # PostgreSQL with pgvector extension
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: dv360-postgres-prod
+    environment:
+      POSTGRES_USER: dv360_user
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dv360_prod_password}
+      POSTGRES_DB: dv360_agents
+      POSTGRES_INITDB_ARGS: "-c max_connections=200"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data_prod:/var/lib/postgresql/data
+      - ./init-db.sql:/docker-entrypoint-initdb.d/init.sql
+    command:
+      - "postgres"
+      - "-c"
+      - "max_connections=200"
+      - "-c"
+      - "shared_buffers=256MB"
+      - "-c"
+      - "effective_cache_size=1GB"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dv360_user -d dv360_agents"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - dv360-network
+
+  # Redis for caching and session management
+  redis:
+    image: redis:7-alpine
+    container_name: dv360-redis-prod
+    command: redis-server --maxmemory 512mb --maxmemory-policy allkeys-lru
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data_prod:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - dv360-network
+
+  # Backend API (scaled with multiple replicas)
+  backend:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+      target: production
+    deploy:
+      replicas: 3  # Start with 3 replicas, can scale with: docker-compose up --scale backend=5
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      # Environment
+      ENVIRONMENT: production
+
+      # API
+      API_HOST: 0.0.0.0
+      API_PORT: 8000
+      API_RELOAD: "false"
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+
+      # PostgreSQL
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: dv360_agents
+      POSTGRES_USER: dv360_user
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dv360_prod_password}
+
+      # Redis
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DB: 0
+
+      # LLM
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+
+      # Snowflake
+      SNOWFLAKE_ACCOUNT: ${SNOWFLAKE_ACCOUNT}
+      SNOWFLAKE_USER: ${SNOWFLAKE_USER}
+      SNOWFLAKE_PASSWORD: ${SNOWFLAKE_PASSWORD}
+      SNOWFLAKE_WAREHOUSE: ${SNOWFLAKE_WAREHOUSE}
+      SNOWFLAKE_DATABASE: ${SNOWFLAKE_DATABASE}
+      SNOWFLAKE_SCHEMA: ${SNOWFLAKE_SCHEMA}
+      SNOWFLAKE_ROLE: ${SNOWFLAKE_ROLE}
+
+      # Logging
+      LOG_LEVEL: INFO
+
+      # Telemetry
+      ENABLE_PROMETHEUS: "true"
+    networks:
+      - dv360-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health/liveness')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Nginx load balancer
+  nginx:
+    image: nginx:alpine
+    container_name: dv360-nginx
+    depends_on:
+      - backend
+    ports:
+      - "80:80"
+      - "8000:8000"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    networks:
+      - dv360-network
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost/health/liveness"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Prometheus for metrics
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: dv360-prometheus-prod
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data_prod:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=30d'
+    networks:
+      - dv360-network
+
+  # Grafana for visualization
+  grafana:
+    image: grafana/grafana:latest
+    container_name: dv360-grafana-prod
+    ports:
+      - "3001:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_SERVER_ROOT_URL: http://localhost:3001
+    volumes:
+      - grafana_data_prod:/var/lib/grafana
+    networks:
+      - dv360-network
+
+volumes:
+  postgres_data_prod:
+  redis_data_prod:
+  prometheus_data_prod:
+  grafana_data_prod:
+
+networks:
+  dv360-network:
+    driver: bridge
