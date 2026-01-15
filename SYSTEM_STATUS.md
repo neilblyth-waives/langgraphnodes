@@ -33,7 +33,7 @@
 
 ### LLM Configuration
 ```
-✅ Primary LLM: Anthropic Claude 3 Haiku (claude-3-haiku-20240307)
+✅ Primary LLM: Anthropic Claude 3.5 Haiku (claude-3-5-haiku-20241022)
 ✅ Embeddings: OpenAI text-embedding-3-small (1536 dimensions)
 ✅ LangSmith Tracing: Enabled (project: dv360-agent-system)
 ```

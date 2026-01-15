@@ -38,8 +38,8 @@ class RoutingAgent:
                 "keywords": ["performance", "campaign", "metrics", "ctr", "roas", "conversions", "optimize", "kpis"],
             },
             "budget_risk": {
-                "description": "Analyzes budget utilization, pacing, and risk assessment, provides spend optimization and risk mitigation",
-                "keywords": ["budget", "pacing", "spend", "allocation", "forecast", "risk", "depletion", "overspend"],
+                "description": "Analyzes budget data for Quiz advertiser and its insertion orders, provides budget pacing assessment, risk identification, and spend optimization recommendations. Handles queries about advertiser-level and insertion order-level budgets.",
+                "keywords": ["budget", "pacing", "spend", "allocation", "forecast", "risk", "depletion", "overspend", "quiz", "insertion order"],
             },
             "delivery_optimization": {
                 "description": "Analyzes creative performance and audience targeting effectiveness, provides delivery optimization recommendations",

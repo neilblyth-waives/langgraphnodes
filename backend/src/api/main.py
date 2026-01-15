@@ -4,9 +4,11 @@ FastAPI application entrypoint.
 import os
 import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 from prometheus_client import make_asgi_app
 import time
 
@@ -176,13 +178,21 @@ if settings.enable_prometheus:
     app.mount("/metrics", metrics_app)
 
 
+# Frontend path (relative to project root)
+FRONTEND_PATH = Path(__file__).parent.parent.parent.parent / "frontend"
+
+
 @app.get("/")
 async def root():
-    """Root endpoint."""
+    """Serve the chat frontend."""
+    index_file = FRONTEND_PATH / "index.html"
+    if index_file.exists():
+        return FileResponse(index_file)
     return {
         "service": "DV360 Multi-Agent System",
         "version": "0.1.0",
         "status": "running",
+        "frontend": "Not found - create frontend/index.html",
     }
 
 

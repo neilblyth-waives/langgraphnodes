@@ -43,6 +43,22 @@ services:
     profiles:
       - local-redis  # Use: docker-compose --profile local-redis up
 
+  # Frontend (static HTML)
+  frontend:
+    image: nginx:alpine
+    container_name: dv360-frontend
+    ports:
+      - "3000:80"
+    volumes:
+      - ./frontend:/usr/share/nginx/html:ro
+    networks:
+      - dv360-network
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
   # Backend API
   backend:
     build:

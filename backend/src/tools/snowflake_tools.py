@@ -77,17 +77,23 @@ async def query_budget_pacing(
 ) -> str:
     """
     Query DV360 budget pacing data from Snowflake for Quiz advertiser.
-    
-    IMPORTANT CONTEXT:
-    - All budgets are for advertiser 'Quiz' only
-    - Budgets are at MONTHLY level (each row = one monthly budget segment)
-    - Table: reports.multi_agent.DV360_BUDGETS_QUIZ
-    
+
+    CRITICAL CONTEXT - ADVERTISER vs INSERTION ORDER:
+    - ADVERTISER: "Quiz" is the advertiser name (NOT an insertion order)
+    - INSERTION ORDERS: Multiple IOs exist under Quiz advertiser (e.g., "Quiz for Jan", "Quiz for Feb")
+    - ALL budgets in table reports.multi_agent.DV360_BUDGETS_QUIZ are for Quiz advertiser
+    - Budgets are at MONTHLY segment level (each row = one month's budget for one IO)
+
+    USAGE GUIDELINES:
+    - To get ALL Quiz advertiser budgets: Leave io_name empty (returns all IOs)
+    - To get specific IO: Set io_name = "Quiz for Jan" (exact match)
+    - To filter by partial name: Use io_name = "Jan" (partial match with LIKE)
+
     Returns monthly budget segments with:
     - INSERTION_ORDER_ID: Insertion order ID
-    - IO_NAME: Insertion order name
-    - IO_STATUS: Insertion order status
-    - SEGMENT_NUMBER: Monthly segment number
+    - IO_NAME: Insertion order name (e.g., "Quiz for Jan", "Quiz for Feb")
+    - IO_STATUS: Insertion order status (Active, Paused, etc.)
+    - SEGMENT_NUMBER: Monthly segment number (1, 2, 3...)
     - BUDGET_AMOUNT: Total budget for the monthly segment
     - SEGMENT_START_DATE: Start date of monthly segment
     - SEGMENT_END_DATE: End date of monthly segment
@@ -96,11 +102,12 @@ async def query_budget_pacing(
     - SEGMENT_STATUS: Budget segment status
 
     Use this tool when analyzing budget allocation, monthly budget segments,
-    or understanding budget structure for Quiz campaigns.
+    or understanding budget structure for Quiz advertiser campaigns.
 
     Args:
         insertion_order_id: Optional insertion order ID to filter by
-        io_name: Optional insertion order name to filter by (supports partial match, e.g., "Quiz")
+        io_name: Optional insertion order name to filter by (supports partial match).
+                 Leave empty to get ALL insertion orders for Quiz advertiser.
         start_date: Optional start date in YYYY-MM-DD format (filters by SEGMENT_START_DATE)
         end_date: Optional end date in YYYY-MM-DD format (filters by SEGMENT_END_DATE)
 

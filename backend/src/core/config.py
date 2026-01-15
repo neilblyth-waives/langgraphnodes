@@ -10,7 +10,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # CRITICAL: Set LangSmith environment variables BEFORE any LangChain imports
 # Read .env file directly to get values before Pydantic Settings loads them
-_env_file = Path(__file__).parent.parent.parent / ".env"
+# Path: config.py -> core -> src -> backend -> project_root/.env
+_env_file = Path(__file__).parent.parent.parent.parent / ".env"
 if _env_file.exists():
     with open(_env_file, "r") as f:
         for line in f:
@@ -55,7 +56,7 @@ class Settings(BaseSettings):
 
     # LLM Provider - Anthropic
     anthropic_api_key: Optional[str] = Field(default=None, description="Anthropic API key")
-    anthropic_model: str = Field(default="claude-3-haiku-20240307", description="Anthropic model - Claude 3 Haiku (cheapest)")
+    anthropic_model: str = Field(default="claude-3-5-haiku-20241022", description="Anthropic model - Claude 3.5 Haiku (fast + smart)")
 
     # LangSmith
     langchain_tracing_v2: bool = Field(default=False, description="Enable LangSmith tracing")

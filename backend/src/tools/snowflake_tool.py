@@ -48,26 +48,58 @@ class SnowflakeTool:
 
         # Check for key pair authentication (preferred - no 2FA!)
         if hasattr(settings, 'snowflake_private_key_path') and settings.snowflake_private_key_path:
-            try:
-                # Read private key file using the exact pattern from user
-                with open(settings.snowflake_private_key_path, "rb") as key_file:
-                    private_key = key_file.read()
+            import os
+            from pathlib import Path
 
-                self.connection_params["private_key"] = private_key
-                logger.info(
-                    "Snowflake initialized with key pair authentication (no 2FA)",
-                    database=settings.snowflake_database,
-                    key_path=settings.snowflake_private_key_path
-                )
-            except Exception as e:
+            # Try multiple paths: configured path (Docker) and local development paths
+            configured_path = settings.snowflake_private_key_path.strip()
+            project_root = Path(__file__).parent.parent.parent.parent
+
+            possible_paths = [
+                configured_path,                                    # Docker: /app/rsa_key.p8
+                project_root / "backend" / "rsa_key.p8",           # Local: backend/rsa_key.p8
+                Path(configured_path.replace("/app/", str(project_root) + "/backend/")),  # Mapped path
+            ]
+
+            key_loaded = False
+            for key_path in possible_paths:
+                key_path = Path(key_path)
+                if key_path.exists():
+                    try:
+                        logger.info(
+                            "Attempting to load private key",
+                            key_path=str(key_path),
+                            file_exists=True
+                        )
+
+                        with open(key_path, "rb") as key_file:
+                            private_key = key_file.read()
+
+                        self.connection_params["private_key"] = private_key
+                        logger.info(
+                            "Snowflake initialized with key pair authentication (no 2FA)",
+                            database=settings.snowflake_database,
+                            key_path=str(key_path)
+                        )
+                        key_loaded = True
+                        break
+                    except Exception as e:
+                        logger.warning(
+                            "Failed to load private key from path",
+                            key_path=str(key_path),
+                            error=str(e)
+                        )
+                        continue
+
+            if not key_loaded:
                 logger.error(
-                    "Failed to load private key, falling back to password auth",
-                    error_message=str(e),
-                    key_path=settings.snowflake_private_key_path
+                    "Private key file not found in any location, falling back to password auth",
+                    tried_paths=[str(p) for p in possible_paths],
+                    current_dir=os.getcwd()
                 )
-                # Fall back to password if key loading fails
                 if settings.snowflake_password:
                     self.connection_params["password"] = settings.snowflake_password
+                    logger.warning("Using password authentication as fallback")
         else:
             # Use password authentication (may require 2FA)
             if settings.snowflake_password:
