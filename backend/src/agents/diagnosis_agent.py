@@ -58,24 +58,27 @@ class DiagnosisAgent:
         all_issues = []
 
         for agent_name, output in agent_results.items():
-            if hasattr(output, 'metadata'):
-                agent_summaries[agent_name] = {
-                    "response_preview": output.response[:300] if output.response else "",
-                    "confidence": output.confidence,
-                    "tools_used": output.tools_used
-                }
+            # Include full response for diagnosis (not truncated)
+            # The LLM needs complete information to properly diagnose
+            agent_summaries[agent_name] = {
+                "response": output.response if output.response else "",
+                "confidence": output.confidence,
+                "tools_used": output.tools_used,
+                "agent_name": output.agent_name if hasattr(output, 'agent_name') else agent_name
+            }
             all_issues.extend(self._extract_issues_from_response(output.response))
 
         # Use LLM for diagnosis
+        # Format agent results for better readability (full responses included)
         diagnosis_prompt = f"""You are a diagnosis agent analyzing results from multiple DV360 specialist agents.
 
 User Query: "{query}"
 
-Agent Results Summary:
-{json.dumps(agent_summaries, indent=2)}
+Agent Results (Full Responses):
+{json.dumps(agent_summaries, indent=2, ensure_ascii=False)}
 
 Identified Issues:
-{chr(10).join(f'- {issue}' for issue in all_issues)}
+{chr(10).join(f'- {issue}' for issue in all_issues) if all_issues else 'None identified'}
 
 Your task:
 1. Identify ROOT CAUSES (not just symptoms)
