@@ -1,47 +1,63 @@
 """
 Health check endpoints for monitoring and load balancing.
+
+Note: Database and Redis are OPTIONAL for the simple supervisor pattern.
+Health checks return "healthy" even without them, with status showing availability.
 """
 from fastapi import APIRouter, Response, status
 from pydantic import BaseModel
-from typing import Dict
+from typing import Dict, Optional
 
-from ...core.database import check_db_health
-from ...core.cache import check_redis_health
+from ...core.database import check_db_health, db_available
+from ...core.cache import check_redis_health, redis_available
 
 router = APIRouter(prefix="/health", tags=["health"])
+
+# Version identifier - update this when making changes
+VERSION = "2.0.0"
 
 
 class HealthResponse(BaseModel):
     """Health check response model."""
     status: str
-    version: str = "0.1.0"
+    version: str = VERSION
     checks: Dict[str, bool]
+    notes: Optional[str] = None
 
 
 @router.get("/", response_model=HealthResponse)
 async def health_check(response: Response):
     """
     Basic health check endpoint.
-    Returns 200 if service is running, with detailed component health.
+    Returns 200 if service is running.
+    Database and Redis are optional - system is healthy without them.
     """
     # Check individual components
     db_healthy = await check_db_health()
     redis_healthy = await check_redis_health()
 
-    # Overall status
-    all_healthy = db_healthy and redis_healthy
-    overall_status = "healthy" if all_healthy else "degraded"
+    # Overall status - service is healthy even without DB/Redis
+    # They're optional for the supervisor pattern
+    overall_status = "healthy"
 
-    # Set HTTP status code
-    if not all_healthy:
-        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+    # Add note if running without optional services
+    notes = None
+    if not db_healthy or not redis_healthy:
+        missing = []
+        if not db_healthy:
+            missing.append("database")
+        if not redis_healthy:
+            missing.append("redis")
+        notes = f"Running without optional services: {', '.join(missing)}"
 
     return HealthResponse(
         status=overall_status,
+        version=VERSION,
         checks={
             "database": db_healthy,
             "redis": redis_healthy,
-        }
+        },
+        notes=notes
     )
 
 
@@ -58,21 +74,16 @@ async def liveness():
 async def readiness(response: Response):
     """
     Kubernetes readiness probe.
-    Returns 200 only if service is ready to accept traffic (all dependencies healthy).
+    Returns 200 if service is ready to accept traffic.
+    Note: Database and Redis are OPTIONAL - service is ready without them.
     """
     db_healthy = await check_db_health()
     redis_healthy = await check_redis_health()
 
-    if not (db_healthy and redis_healthy):
-        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
-        return {
-            "status": "not_ready",
-            "database": db_healthy,
-            "redis": redis_healthy,
-        }
-
+    # Service is ready even without DB/Redis (they're optional)
     return {
         "status": "ready",
         "database": db_healthy,
         "redis": redis_healthy,
+        "notes": "Database and Redis are optional. Service works without them."
     }

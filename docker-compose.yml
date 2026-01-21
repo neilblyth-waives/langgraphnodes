@@ -1,73 +1,21 @@
+# Docker Compose for Supervisor Agent System
+#
+# Quick Start:
+#   1. Copy .env.example to .env and fill in your API keys
+#   2. Run: docker-compose up --build
+#   3. Open: http://localhost:8000 (backend) or http://localhost:3000 (frontend)
+#
+# Note: PostgreSQL and Redis are OPTIONAL - the system works without them.
+
 services:
-  # PostgreSQL with pgvector extension
-  # NOTE: Commented out - using external VPS PostgreSQL (configured via .env)
-  # Uncomment if you want to use local Docker PostgreSQL instead
-  # postgres:
-  #   image: pgvector/pgvector:pg16
-  #   container_name: dv360-postgres
-  #   environment:
-  #     POSTGRES_USER: dvdbowner
-  #     POSTGRES_PASSWORD: dvagentlangchain
-  #     POSTGRES_DB: dv360agent
-  #   ports:
-  #     - "5432:5432"
-  #   volumes:
-  #     - postgres_data:/var/lib/postgresql/data
-  #     - ./init-db.sql:/docker-entrypoint-initdb.d/init.sql
-  #   healthcheck:
-  #     test: ["CMD-SHELL", "pg_isready -U dvdbowner -d dv360agent"]
-  #     interval: 10s
-  #     timeout: 5s
-  #     retries: 5
-  #   networks:
-  #     - dv360-network
-  #   profiles:
-  #     - local-postgres  # Use: docker-compose --profile local-postgres up
-
-  # Redis for caching and session management
-  # NOTE: Comment out this service if using external Redis (e.g., Redis Cloud)
-  redis:
-    image: redis:7-alpine
-    container_name: dv360-redis
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - dv360-network
-    profiles:
-      - local-redis  # Use: docker-compose --profile local-redis up
-
-  # Frontend (static HTML)
-  frontend:
-    image: nginx:alpine
-    container_name: dv360-frontend
-    ports:
-      - "3000:80"
-    volumes:
-      - ./frontend:/usr/share/nginx/html:ro
-    networks:
-      - dv360-network
-    healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-
-  # Backend API
+  # Backend API with Supervisor Agent System
   backend:
     build:
       context: ./backend
       dockerfile: Dockerfile
       target: development
-    container_name: dv360-backend
-    # Note: No depends_on - using external VPS PostgreSQL and Redis Cloud
-    # To use local services, uncomment postgres/redis services and add depends_on section
+    image: supervisor-backend:latest
+    container_name: supervisor-backend
     environment:
       # Environment
       ENVIRONMENT: development
@@ -76,32 +24,34 @@ services:
       API_HOST: 0.0.0.0
       API_PORT: 8000
       API_RELOAD: "true"
-      CORS_ORIGINS: http://localhost:3000,http://localhost:8000
+      CORS_ORIGINS: http://localhost:3000,http://localhost:8000,http://127.0.0.1:8000,http://127.0.0.1:3000
 
-      # PostgreSQL (reads from .env file - configured for VPS PostgreSQL)
-      POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
+      # PostgreSQL (OPTIONAL - system works without it)
+      # Set these if you want session persistence
+      POSTGRES_HOST: ${POSTGRES_HOST:-localhost}
       POSTGRES_PORT: ${POSTGRES_PORT:-5432}
       POSTGRES_DB: ${POSTGRES_DB:-dv360agent}
-      POSTGRES_USER: ${POSTGRES_USER:-dvdbowner}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dvagentlangchain}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
 
-      # Redis (reads from .env file - configured for Redis Cloud)
-      REDIS_HOST: ${REDIS_HOST:-redis}
+      # Redis (OPTIONAL - system works without it)
+      # Set these if you want caching and rate limiting
+      REDIS_HOST: ${REDIS_HOST:-localhost}
       REDIS_PORT: ${REDIS_PORT:-6379}
       REDIS_DB: ${REDIS_DB:-0}
       REDIS_PASSWORD: ${REDIS_PASSWORD:-}
 
-      # LLM (set your API keys in .env file)
+      # LLM (REQUIRED - at least one must be set)
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
 
-      # LangSmith Tracing (set in .env file)
+      # LangSmith Tracing (OPTIONAL - for debugging)
       LANGCHAIN_TRACING_V2: ${LANGCHAIN_TRACING_V2:-false}
       LANGCHAIN_API_KEY: ${LANGCHAIN_API_KEY:-}
       LANGCHAIN_PROJECT: ${LANGCHAIN_PROJECT:-dv360-agent-system}
       LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
 
-      # Snowflake (set in .env file)
+      # Snowflake (REQUIRED for data queries)
       SNOWFLAKE_ACCOUNT: ${SNOWFLAKE_ACCOUNT:-}
       SNOWFLAKE_USER: ${SNOWFLAKE_USER:-}
       SNOWFLAKE_PASSWORD: ${SNOWFLAKE_PASSWORD:-}
@@ -122,53 +72,75 @@ services:
       - ./backend:/app
       - backend_cache:/app/.cache
     networks:
-      - dv360-network
+      - supervisor-network
     healthcheck:
-      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health/liveness')"]
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health/liveness"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 40s
 
-  # Prometheus (optional, for metrics)
-  prometheus:
-    image: prom/prometheus:latest
-    container_name: dv360-prometheus
+  # Frontend (static HTML served by nginx)
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: supervisor-frontend:latest
+    container_name: supervisor-frontend
     ports:
-      - "9090:9090"
-    volumes:
-      - ./prometheus.yml:/etc/prometheus/prometheus.yml
-      - prometheus_data:/prometheus
-    command:
-      - '--config.file=/etc/prometheus/prometheus.yml'
-      - '--storage.tsdb.path=/prometheus'
+      - "3000:80"
     networks:
-      - dv360-network
-    profiles:
-      - monitoring
+      - supervisor-network
+    depends_on:
+      - backend
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
-  # Grafana (optional, for visualization)
-  grafana:
-    image: grafana/grafana:latest
-    container_name: dv360-grafana
-    ports:
-      - "3001:3000"
-    environment:
-      GF_SECURITY_ADMIN_PASSWORD: admin
-    volumes:
-      - grafana_data:/var/lib/grafana
-    networks:
-      - dv360-network
-    profiles:
-      - monitoring
+  # ============================================================
+  # OPTIONAL: Uncomment below to run local PostgreSQL and Redis
+  # ============================================================
+  # postgres:
+  #   image: pgvector/pgvector:pg16
+  #   container_name: supervisor-postgres
+  #   environment:
+  #     POSTGRES_DB: dv360agent
+  #     POSTGRES_USER: postgres
+  #     POSTGRES_PASSWORD: postgres
+  #   ports:
+  #     - "5432:5432"
+  #   volumes:
+  #     - postgres_data:/var/lib/postgresql/data
+  #   networks:
+  #     - supervisor-network
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "pg_isready -U postgres"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 5
+
+  # redis:
+  #   image: redis:7-alpine
+  #   container_name: supervisor-redis
+  #   ports:
+  #     - "6379:6379"
+  #   volumes:
+  #     - redis_data:/data
+  #   networks:
+  #     - supervisor-network
+  #   healthcheck:
+  #     test: ["CMD", "redis-cli", "ping"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 5
 
 volumes:
-  postgres_data:
-  redis_data:
   backend_cache:
-  prometheus_data:
-  grafana_data:
+  # postgres_data:  # Uncomment if using local PostgreSQL
+  # redis_data:     # Uncomment if using local Redis
 
 networks:
-  dv360-network:
+  supervisor-network:
     driver: bridge

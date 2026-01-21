@@ -70,10 +70,11 @@ async def lifespan(app: FastAPI):
 
 
 # Create FastAPI app
+VERSION = "2.0.0"  # Updated version identifier
 app = FastAPI(
-    title="DV360 Multi-Agent System",
-    description="AI-powered DV360 strategy and analysis platform",
-    version="0.1.0",
+    title="DV360 Supervisor Agent System",
+    description="Simple supervisor system with budget and performance agents",
+    version=VERSION,
     lifespan=lifespan,
 )
 
@@ -189,10 +190,12 @@ async def root():
     if index_file.exists():
         return FileResponse(index_file)
     return {
-        "service": "DV360 Multi-Agent System",
-        "version": "0.1.0",
+        "service": "DV360 Supervisor Agent System",
+        "version": VERSION,
         "status": "running",
+        "agents": ["supervisor", "budget", "performance"],
         "frontend": "Not found - create frontend/index.html",
+        "supervisor_version": "2.0.0 - Improved FINISH logic",
     }
 
 

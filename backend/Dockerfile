@@ -1,4 +1,5 @@
-# Multi-stage build for production-ready Python backend
+# Multi-stage build for DV360 Supervisor Agent System
+# Simple supervisor with budget and performance agents
 FROM python:3.11-slim as base
 
 # Set environment variables
@@ -10,6 +11,7 @@ ENV PYTHONUNBUFFERED=1 \
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
     gcc \
+    curl \
     postgresql-client \
     && rm -rf /var/lib/apt/lists/*
 

@@ -416,20 +416,15 @@
         let currentTrace = null;
         let currentTab = 'overview';
 
-        // Phase display configuration
+        // Phase display configuration (simple supervisor pattern)
         const PHASE_CONFIG = {
-            'orchestrator_analysis': { name: 'Analyzing query', icon: '🎯' },
-            'gate': { name: 'Validating request', icon: '🛡️' },
-            'invoke_agents': { name: 'Running agents', icon: '🤖' },
-            'orchestrator_review': { name: 'Reviewing results', icon: '🔍' },
-            'requery_agents': { name: 'Re-querying agents', icon: '🔄' },
-            'orchestrator_coordination': { name: 'Coordinating analysis', icon: '🧠' },
-            'validation': { name: 'Validating recommendations', icon: '✅' },
-            'generate_response': { name: 'Formatting response', icon: '📝' }
+            'supervisor': { name: 'Routing request', icon: '🎯' },
+            'budget': { name: 'Analyzing budget', icon: '💰' },
+            'performance': { name: 'Analyzing performance', icon: '📊' }
         };
 
         // All phases in order for display
-        const PHASE_ORDER = ['orchestrator_analysis', 'gate', 'invoke_agents', 'orchestrator_review', 'requery_agents', 'orchestrator_coordination', 'validation', 'generate_response'];
+        const PHASE_ORDER = ['supervisor', 'budget', 'performance'];
 
         // Check API health on load
         async function checkHealth() {
@@ -457,7 +452,7 @@
             // Add user message
             addMessage(message, 'user');
 
-            // Add progress indicator
+            // Add progress indicator (shows phases as they happen)
             const progressId = addProgressIndicator();
             const startTime = Date.now();
 
@@ -477,7 +472,7 @@
                     throw new Error(`Server error: ${response.status}`);
                 }
 
-                // Read streaming response
+                // Read SSE stream
                 const reader = response.body.getReader();
                 const decoder = new TextDecoder();
                 let buffer = '';
@@ -488,25 +483,24 @@
 
                     buffer += decoder.decode(value, { stream: true });
 
-                    // Process complete SSE messages (data: {...}\n\n)
+                    // Process complete SSE messages
                     const lines = buffer.split('\n');
                     buffer = lines.pop() || ''; // Keep incomplete line in buffer
 
                     for (const line of lines) {
                         if (line.startsWith('data: ')) {
                             try {
-                                const eventData = JSON.parse(line.slice(6));
-                                handleStreamEvent(eventData, progressId, startTime);
-                            } catch (parseError) {
-                                console.error('Failed to parse SSE event:', parseError);
+                                const event = JSON.parse(line.slice(6));
+                                handleStreamEvent(event, progressId, startTime);
+                            } catch (e) {
+                                console.error('Failed to parse SSE:', line, e);
                             }
                         }
                     }
                 }
 
             } catch (e) {
-                removeProgressIndicator(progressId);
-                addMessage('Error: Could not connect to the API. Make sure the backend is running.', 'assistant', { error: true });
+                appendErrorToProgress(progressId, 'Could not connect to the API. Make sure the backend is running.');
                 console.error(e);
             }
 
@@ -517,7 +511,7 @@
         // Handle streaming events
         function handleStreamEvent(event, progressId, startTime) {
             if (event.type === 'progress') {
-                updateProgressStage(progressId, event.phase, event.status, event.message, event.elapsed_ms);
+                updateProgressStage(progressId, event.phase, event.status, event.message, event.duration_ms);
             } else if (event.type === 'complete') {
                 const clientTime = Date.now() - startTime;
 

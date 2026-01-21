@@ -1,5 +1,9 @@
 """
 Database connection management for PostgreSQL.
+
+Note: Database is OPTIONAL for the simple supervisor pattern.
+The supervisor can run without a database - it's only needed for
+session persistence and memory features.
 """
 import asyncpg
 from typing import Optional
@@ -19,39 +23,53 @@ async_session_maker: Optional[async_sessionmaker] = None
 # Connection pool for raw asyncpg queries (for pgvector operations)
 pg_pool: Optional[asyncpg.Pool] = None
 
+# Track if database is available
+db_available: bool = False
+
 
 async def init_db() -> None:
-    """Initialize database engine and connection pool."""
-    global engine, async_session_maker, pg_pool
+    """Initialize database engine and connection pool.
 
-    # SQLAlchemy async engine
-    engine = create_async_engine(
-        settings.database_url,
-        echo=settings.is_development,
-        pool_size=20,
-        max_overflow=10,
-        pool_pre_ping=True,
-        pool_recycle=3600,
-    )
+    This is OPTIONAL - the supervisor can run without a database.
+    If connection fails, we log a warning but continue.
+    """
+    global engine, async_session_maker, pg_pool, db_available
 
-    # Session maker
-    async_session_maker = async_sessionmaker(
-        engine,
-        class_=AsyncSession,
-        expire_on_commit=False,
-        autocommit=False,
-        autoflush=False,
-    )
+    try:
+        # SQLAlchemy async engine
+        engine = create_async_engine(
+            settings.database_url,
+            echo=settings.is_development,
+            pool_size=20,
+            max_overflow=10,
+            pool_pre_ping=True,
+            pool_recycle=3600,
+        )
 
-    # Raw asyncpg pool for vector operations
-    pg_pool = await asyncpg.create_pool(
-        settings.database_url.replace("+asyncpg", ""),
-        min_size=5,
-        max_size=20,
-        command_timeout=60,
-    )
+        # Session maker
+        async_session_maker = async_sessionmaker(
+            engine,
+            class_=AsyncSession,
+            expire_on_commit=False,
+            autocommit=False,
+            autoflush=False,
+        )
 
-    print(f"✓ Database initialized: {settings.postgres_host}:{settings.postgres_port}/{settings.postgres_db}")
+        # Raw asyncpg pool for vector operations
+        pg_pool = await asyncpg.create_pool(
+            settings.database_url.replace("+asyncpg", ""),
+            min_size=5,
+            max_size=20,
+            command_timeout=60,
+        )
+
+        db_available = True
+        print(f"✓ Database initialized: {settings.postgres_host}:{settings.postgres_port}/{settings.postgres_db}")
+
+    except Exception as e:
+        db_available = False
+        print(f"⚠ Database not available (optional): {e}")
+        print("  The supervisor will run without database features (session persistence, memory).")
 
 
 async def close_db() -> None:
@@ -115,11 +133,17 @@ async def check_db_health() -> bool:
 
 
 async def ensure_pgvector_extension() -> None:
-    """Ensure pgvector extension is installed."""
+    """Ensure pgvector extension is installed.
+
+    This is OPTIONAL - if database is not available, we skip this.
+    """
+    if not db_available:
+        print("⚠ Skipping pgvector extension (database not available)")
+        return
+
     try:
         async with get_pg_connection() as conn:
             await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
             print("✓ pgvector extension ensured")
     except Exception as e:
-        print(f"✗ Failed to create pgvector extension: {e}")
-        raise
+        print(f"⚠ Failed to create pgvector extension (optional): {e}")
