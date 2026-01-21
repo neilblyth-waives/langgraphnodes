@@ -77,14 +77,14 @@ def make_supervisor_node(llm: BaseChatModel, members: List[str]):
         "- Route to 'performance' if the user asks about campaign performance, metrics, impressions, clicks, conversions, or revenue.\n"
         "- If the user's request mentions BOTH performance AND budgets, route to 'performance' FIRST, then 'budget'.\n\n"
         "WHEN TO PROVIDE YOUR OWN RESPONSE (supervisor_response):\n"
-        "- When you have responses from multiple workers and need to synthesize them\n"
-        "- When you need to coordinate between worker outputs\n"
-        "- When you can provide a complete answer by combining worker responses\n"
-        "- When providing a final summary after all workers have responded\n"
-        "- Set next='FINISH' and provide supervisor_response\n\n"
+        "- ONLY when you have responses from MULTIPLE workers and need to synthesize/coordinate them\n"
+        "- ONLY when a single worker's response is incomplete or needs additional context\n"
+        "- DO NOT provide supervisor_response if a single worker already gave a complete, well-formatted answer\n"
+        "- If a worker provided a complete answer, just FINISH and let their response be the final answer\n"
+        "- Set next='FINISH' and provide supervisor_response ONLY when synthesis is truly needed\n\n"
         "WHEN TO FINISH:\n"
-        "- If you provided a supervisor_response that answers the user's question completely\n"
-        "- If ALL required workers have responded and you've synthesized their outputs\n"
+        "- If a single worker provided a complete answer - FINISH without supervisor_response (let their answer stand)\n"
+        "- If you provided a supervisor_response that synthesizes multiple worker outputs\n"
         "- If the user's message is unclear - provide clarification and FINISH\n"
         "- Never FINISH without a response unless asking for clarification"
     )
@@ -145,19 +145,38 @@ def make_supervisor_node(llm: BaseChatModel, members: List[str]):
             # Default to FINISH if invalid response
             goto = "FINISH"
 
+        # Check if only one agent responded and completed - don't synthesize, just FINISH
+        # This prevents unnecessary supervisor responses when agent already gave complete answer
+        single_agent_complete = (
+            (budget_complete and not performance_complete and len(agents_called) == 1) or
+            (performance_complete and not budget_complete and len(agents_called) == 1)
+        )
+        
         # If supervisor wants to provide its own response (synthesize/coordinate)
-        if supervisor_response and goto == "FINISH":
+        # BUT only if we have multiple agents or truly need synthesis
+        if supervisor_response and goto == "FINISH" and not single_agent_complete:
             return Command(
                 goto=END,
                 update={
                     "next": "FINISH",
                     "iteration_count": iteration_count + 1,
                     "messages": [
-                        HumanMessage(
+                        AIMessage(
                             content=supervisor_response,
                             name="supervisor"
                         )
                     ]
+                }
+            )
+        
+        # If single agent completed and supervisor didn't generate response, just FINISH
+        # The agent's message is already in state and will be the final response
+        if goto == "FINISH" and single_agent_complete:
+            return Command(
+                goto=END,
+                update={
+                    "next": "FINISH",
+                    "iteration_count": iteration_count + 1
                 }
             )
 
@@ -169,7 +188,7 @@ def make_supervisor_node(llm: BaseChatModel, members: List[str]):
                     "next": "FINISH",
                     "iteration_count": iteration_count + 1,
                     "messages": [
-                        HumanMessage(
+                        AIMessage(
                             content=clarification,
                             name="supervisor"
                         )
@@ -201,8 +220,20 @@ def make_supervisor_node(llm: BaseChatModel, members: List[str]):
 async def budget_node(state: State) -> Command[Literal["supervisor"]]:
     result = await budget_agent.ainvoke(state)
     
-    # Check if agent response indicates completion
-    agent_response = result["messages"][-1].content
+    # Get agent response - handle both string and structured content
+    agent_response_raw = result["messages"][-1].content
+    
+    # Convert to string if needed
+    if isinstance(agent_response_raw, str):
+        agent_response = agent_response_raw
+    elif isinstance(agent_response_raw, dict) and 'text' in agent_response_raw:
+        agent_response = agent_response_raw['text']
+    elif isinstance(agent_response_raw, list):
+        # Join list items
+        agent_response = " ".join(str(item.get('text', item) if isinstance(item, dict) else item) for item in agent_response_raw)
+    else:
+        agent_response = str(agent_response_raw)
+    
     task_complete = any(phrase in agent_response.lower() for phrase in [
         "complete", "finished", "done", "summary", "conclusion", "final"
     ]) or len(agent_response) > 200  # Substantial response likely means complete
@@ -222,8 +253,20 @@ async def budget_node(state: State) -> Command[Literal["supervisor"]]:
 async def performance_node(state: State) -> Command[Literal["supervisor"]]:
     result = await performance_agent.ainvoke(state)
     
-    # Check if agent response indicates completion
-    agent_response = result["messages"][-1].content
+    # Get agent response - handle both string and structured content
+    agent_response_raw = result["messages"][-1].content
+    
+    # Convert to string if needed
+    if isinstance(agent_response_raw, str):
+        agent_response = agent_response_raw
+    elif isinstance(agent_response_raw, dict) and 'text' in agent_response_raw:
+        agent_response = agent_response_raw['text']
+    elif isinstance(agent_response_raw, list):
+        # Join list items
+        agent_response = " ".join(str(item.get('text', item) if isinstance(item, dict) else item) for item in agent_response_raw)
+    else:
+        agent_response = str(agent_response_raw)
+    
     task_complete = any(phrase in agent_response.lower() for phrase in [
         "complete", "finished", "done", "summary", "conclusion", "final"
     ]) or len(agent_response) > 200  # Substantial response likely means complete
@@ -293,9 +336,20 @@ class Supervisor:
                 for msg in previous_messages:
                     if not hasattr(msg, 'content'):
                         continue
+                    # Get content as string (handle structured formats)
+                    content_raw = msg.content
+                    if isinstance(content_raw, str):
+                        content = content_raw
+                    elif isinstance(content_raw, dict) and 'text' in content_raw:
+                        content = content_raw['text']
+                    elif isinstance(content_raw, list):
+                        content = " ".join(str(item.get('text', item) if isinstance(item, dict) else item) for item in content_raw)
+                    else:
+                        content = str(content_raw)
+                    
                     role = 'user' if isinstance(msg, HumanMessage) else 'assistant' if isinstance(msg, AIMessage) else 'system'
                     agent_name = getattr(msg, 'name', None) if isinstance(msg, AIMessage) else None
-                    sig = (msg.content, role, agent_name)
+                    sig = (content, role, agent_name)
                     previous_signatures.add(sig)
             else:
                 previous_signatures = set()
@@ -309,7 +363,19 @@ class Supervisor:
                 
                 role = 'user' if isinstance(msg, HumanMessage) else 'assistant' if isinstance(msg, AIMessage) else 'system'
                 agent_name = getattr(msg, 'name', None) if isinstance(msg, AIMessage) else None
-                sig = (msg.content, role, agent_name)
+                
+                # Get content as string (handle structured formats)
+                content_raw = msg.content
+                if isinstance(content_raw, str):
+                    content = content_raw
+                elif isinstance(content_raw, dict) and 'text' in content_raw:
+                    content = content_raw['text']
+                elif isinstance(content_raw, list):
+                    content = " ".join(str(item.get('text', item) if isinstance(item, dict) else item) for item in content_raw)
+                else:
+                    content = str(content_raw)
+                
+                sig = (content, role, agent_name)
                 
                 # Always include user messages (allow duplicates)
                 # Only filter assistant/system messages
@@ -322,9 +388,19 @@ class Supervisor:
                     messages=new_messages
                 )
 
-        # Get last message content
+        # Get last message content (handle structured formats)
         messages = final_state.get("messages", [])
-        final_response = messages[-1].content if messages else "No response"
+        final_response = "No response"
+        if messages:
+            last_content = messages[-1].content
+            if isinstance(last_content, str):
+                final_response = last_content
+            elif isinstance(last_content, dict) and 'text' in last_content:
+                final_response = last_content['text']
+            elif isinstance(last_content, list):
+                final_response = " ".join(str(item.get('text', item) if isinstance(item, dict) else item) for item in last_content)
+            else:
+                final_response = str(last_content)
 
         return AgentOutput(
             response=final_response,

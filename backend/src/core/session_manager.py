@@ -13,6 +13,8 @@ from .telemetry import get_logger
 logger = get_logger(__name__)
 
 
+
+
 async def get_or_create_session(user_id: str, session_id: Optional[UUID] = None) -> UUID:
     """Get existing session or create new one."""
     if not db_available:
@@ -141,9 +143,21 @@ async def save_messages_from_state(session_id: UUID, messages: List[BaseMessage]
         for msg in existing_messages:
             if not hasattr(msg, 'content'):
                 continue
+            # Get content as string (handle structured formats)
+            content_raw = msg.content
+            if isinstance(content_raw, str):
+                content = content_raw
+            elif isinstance(content_raw, dict) and 'text' in content_raw:
+                content = content_raw['text']
+            elif isinstance(content_raw, list):
+                content = " ".join(str(item.get('text', item) if isinstance(item, dict) else item) for item in content_raw)
+            else:
+                content = str(content_raw)
+            
             role = 'user' if isinstance(msg, HumanMessage) else 'assistant' if isinstance(msg, AIMessage) else 'system'
             agent_name = getattr(msg, 'name', None) if isinstance(msg, AIMessage) else None
-            sig = (msg.content, role, agent_name)
+            
+            sig = (content, role, agent_name)
             existing_signatures.add(sig)
         
         # Save only new messages
@@ -165,8 +179,19 @@ async def save_messages_from_state(session_id: UUID, messages: List[BaseMessage]
             else:
                 continue
             
+            # Get content as string (handle structured formats)
+            content_raw = msg.content
+            if isinstance(content_raw, str):
+                content = content_raw
+            elif isinstance(content_raw, dict) and 'text' in content_raw:
+                content = content_raw['text']
+            elif isinstance(content_raw, list):
+                content = " ".join(str(item.get('text', item) if isinstance(item, dict) else item) for item in content_raw)
+            else:
+                content = str(content_raw)
+            
             # Check if this exact message already exists
-            msg_sig = (msg.content, role, agent_name)
+            msg_sig = (content, role, agent_name)
             
             # Always allow user messages (even if duplicate content - user can send same message multiple times)
             # Only skip duplicate assistant/system messages
@@ -177,7 +202,7 @@ async def save_messages_from_state(session_id: UUID, messages: List[BaseMessage]
             await save_message(
                 session_id=session_id,
                 role=role,
-                content=msg.content,
+                content=content,  # Use extracted text content
                 agent_name=agent_name
             )
             

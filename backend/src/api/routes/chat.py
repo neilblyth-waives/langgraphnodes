@@ -138,17 +138,24 @@ async def stream_message(request: ChatRequest):
             # Get final response
             execution_time_ms = int((time.time() - start_time) * 1000)
             messages = final_state.get("messages", []) if final_state else []
-            final_response = messages[-1].content if messages else "No response"
+            
+            # Extract final response content (handle structured formats)
+            final_response = "No response"
+            if messages:
+                last_content = messages[-1].content
+                if isinstance(last_content, str):
+                    final_response = last_content
+                elif isinstance(last_content, dict) and 'text' in last_content:
+                    final_response = last_content['text']
+                elif isinstance(last_content, list):
+                    final_response = " ".join(str(item.get('text', item) if isinstance(item, dict) else item) for item in last_content)
+                else:
+                    final_response = str(last_content)
 
             # Save messages to session
             if session_id and final_state:
-                previous_content_set = {msg.content for msg in (previous_messages or []) if hasattr(msg, 'content')}
-                new_messages = [
-                    msg for msg in messages
-                    if hasattr(msg, 'content') and msg.content not in previous_content_set
-                ]
-                if new_messages:
-                    await save_messages_from_state(session_id=session_id, messages=new_messages)
+                # Use save_messages_from_state which handles duplicate detection properly
+                await save_messages_from_state(session_id=session_id, messages=messages)
 
             # Send complete event
             yield f"data: {json.dumps({'type': 'complete', 'data': {'response': final_response, 'session_id': str(session_id), 'execution_time_ms': execution_time_ms, 'agent_name': 'supervisor', 'confidence': 0.9, 'tools_used': []}})}\n\n"
