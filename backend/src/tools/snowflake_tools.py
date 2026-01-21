@@ -165,6 +165,13 @@ async def execute_custom_snowflake_query(query: str) -> str:
     - Example: Use INSERTION_ORDER not insertion_order, SPEND_GBP not spend_gbp
     - Aliases should also be UPPERCASE: SUM(spend_gbp) AS TOTAL_SPEND
     
+    **CRITICAL - DATE EXCLUSION RULE:**
+    - There is NO data for today's date - data is only available up to YESTERDAY
+    - ALWAYS exclude today's date from queries: DATE < CURRENT_DATE() or DATE <= DATEADD(day, -1, CURRENT_DATE())
+    - When users ask for "last 7 days", query 8 days back to yesterday: DATE >= DATEADD(day, -8, CURRENT_DATE()) AND DATE < CURRENT_DATE()
+    - When users ask for "this week" or "current week", end date should be yesterday: DATE <= DATEADD(day, -1, CURRENT_DATE())
+    - Never use DATE >= CURRENT_DATE() or DATE = CURRENT_DATE() - these will return no data
+    
     - Date filtering: Use EXTRACT(MONTH FROM date) and EXTRACT(YEAR FROM date)
     - Date format: Use 'YYYY-MM-DD' format (e.g., '2026-01-01')
     - Aggregations: Use SUM(), COUNT(DISTINCT column), AVG() with GROUP BY
@@ -173,10 +180,16 @@ async def execute_custom_snowflake_query(query: str) -> str:
     
     EXAMPLE QUERIES:
     ================
-    -- IO-level performance (NOTE: All column names in UPPERCASE):
+    -- IO-level performance (NOTE: All column names in UPPERCASE, exclude today):
     SELECT INSERTION_ORDER, SUM(SPEND_GBP) AS TOTAL_SPEND, SUM(IMPRESSIONS) AS TOTAL_IMPRESSIONS
     FROM reports.reporting_revamp.ALL_PERFORMANCE_AGG
-    WHERE ADVERTISER = 'Quiz' AND DATE >= '2026-01-01' AND DATE <= '2026-01-31'
+    WHERE ADVERTISER = 'Quiz' AND DATE >= '2026-01-01' AND DATE < CURRENT_DATE()
+    GROUP BY INSERTION_ORDER ORDER BY TOTAL_SPEND DESC
+    
+    -- Last 7 days (query 8 days back to yesterday, exclude today):
+    SELECT INSERTION_ORDER, SUM(SPEND_GBP) AS TOTAL_SPEND
+    FROM reports.reporting_revamp.ALL_PERFORMANCE_AGG
+    WHERE ADVERTISER = 'Quiz' AND DATE >= DATEADD(day, -8, CURRENT_DATE()) AND DATE < CURRENT_DATE()
     GROUP BY INSERTION_ORDER ORDER BY TOTAL_SPEND DESC
     
     -- Monthly budgets (NOTE: All column names in UPPERCASE):

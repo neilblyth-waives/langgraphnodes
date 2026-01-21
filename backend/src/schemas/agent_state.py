@@ -64,10 +64,11 @@ class OrchestratorState(TypedDict):
     conversation_history: List[Dict[str, Any]]  # Recent conversation messages for context
     relevant_learnings: List[Dict[str, Any]]
 
-    # Routing phase
-    routing_decision: Dict[str, Any]  # From routing_agent
-    routing_confidence: float
-    selected_agents: List[str]
+    # Orchestrator analysis phase (replaces routing)
+    strategy: Dict[str, Any]  # Orchestrator's coordinated strategy
+    analysis_result: Dict[str, Any]  # Analysis of query intent
+    selected_agents: List[str]  # Agents selected by orchestrator
+    normalized_params: Dict[str, Any]  # Normalized parameters (time_period, dates, etc.)
     clarification_needed: bool  # Whether query needs clarification
     clarification_message: Optional[str]  # Message to show user for clarification
 
@@ -80,18 +81,23 @@ class OrchestratorState(TypedDict):
     agent_results: Dict[str, Any]  # {agent_name: AgentOutput}
     agent_errors: Dict[str, str]  # {agent_name: error_message}
 
-    # Diagnosis phase
+    # Orchestrator review phase (new)
+    review_result: Dict[str, Any]  # Review of agent results
+    agent_time_periods: Dict[str, str]  # {agent_name: time_period_used}
+    requery_count: int  # Number of re-queries attempted
+    max_requeries: int  # Maximum re-queries allowed (default: 2)
+
+    # Orchestrator coordination phase (replaces diagnosis/recommendation)
+    coordination_result: Dict[str, Any]  # Coordinated diagnosis/recommendations
     diagnosis: Dict[str, Any]  # Root cause analysis
     correlations: List[str]  # Cross-agent correlations
     severity_assessment: str  # critical, high, medium, low
+    recommendations: List[Dict[str, str]]  # Consolidated recommendations
+    recommendation_confidence: float
 
     # Early exit check
     should_exit_early: bool
     early_exit_reason: Optional[str]
-
-    # Recommendation phase
-    recommendations: List[Dict[str, str]]  # Consolidated recommendations
-    recommendation_confidence: float
 
     # Validation phase
     validation_result: Dict[str, Any]
@@ -442,9 +448,10 @@ def create_initial_orchestrator_state(
         session_history=[],
         conversation_history=[],
         relevant_learnings=[],
-        routing_decision={},
-        routing_confidence=0.0,
+        strategy={},
+        analysis_result={},
         selected_agents=[],
+        normalized_params={},
         clarification_needed=False,
         clarification_message=None,
         gate_result={},
@@ -452,13 +459,18 @@ def create_initial_orchestrator_state(
         gate_warnings=[],
         agent_results={},
         agent_errors={},
+        review_result={},
+        agent_time_periods={},
+        requery_count=0,
+        max_requeries=2,
+        coordination_result={},
         diagnosis={},
         correlations=[],
         severity_assessment="",
-        should_exit_early=False,
-        early_exit_reason=None,
         recommendations=[],
         recommendation_confidence=0.0,
+        should_exit_early=False,
+        early_exit_reason=None,
         validation_result={},
         validated_recommendations=[],
         validation_warnings=[],

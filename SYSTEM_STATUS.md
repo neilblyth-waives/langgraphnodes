@@ -1,7 +1,7 @@
 # DV360 Agent System - Current Status
 
-**Last Updated**: 2026-01-15  
-**Recent Changes**: See `RECENT_CHANGES.md` for latest updates  
+**Last Updated**: 2026-01-21
+**Recent Changes**: See `RECENT_CHANGES.md` for latest updates
 **Status**: ✅ **FULLY OPERATIONAL**
 
 ---
@@ -169,18 +169,44 @@ Tables: DV360_PERFORMANCE_QUIZ, DV360_BUDGETS_QUIZ,
 User Query → API (/api/chat/)
     ↓
 Orchestrator (RouteFlow)
-    ├─► 1. Routing Agent (LLM selects agents)
+    ├─► 1. Routing Agent (LLM selects agents + conversation history)
     ├─► 2. Gate Node (validates query)
-    ├─► 3. Specialist Agents (parallel execution)
+    ├─► 3. Specialist Agents (parallel execution with context)
     │      ├─► Performance Agent (LangGraph + ReAct)
     │      ├─► Delivery Agent (LangGraph + ReAct)
     │      └─► Budget Risk Agent (ReAct)
-    ├─► 4. Diagnosis Agent (root cause analysis)
-    ├─► 5. Early Exit Check (conditional)
+    ├─► 4. Diagnosis Agent (root cause analysis, skipped for follow-ups)
+    ├─► 5. Early Exit Check (conditional, includes clarification path)
     ├─► 6. Recommendation Agent (generates recommendations)
     ├─► 7. Validation Agent (validates recommendations)
     └─► Response (markdown formatted)
 ```
+
+### Key System Features
+
+**Conversation Context & Memory**:
+- All specialist agents receive last 10 messages via `input_data.context["conversation_history"]`
+- Routing agent uses conversation history to interpret follow-up queries
+- Diagnosis skipped for simple follow-ups ("yes", "no", "that one")
+
+**Clarification Flow**:
+- Routing agent can request clarification with `AGENTS: NONE` + `CLARIFICATION:` line
+- Orchestrator skips specialist agents and goes directly to response generation
+- Enables natural back-and-forth without agent invocation overhead
+
+**Progress Updates**:
+- Real-time progress callbacks via `invoke_with_progress()` method
+- Provides user feedback during long-running operations
+
+**Data & SQL Rules**:
+- Data available only up to YESTERDAY (not today)
+- "Last N days" queries require N+1 days lookback
+- All SQL column names must be UPPERCASE (auto-normalized)
+- All financial values in British Pounds (GBP/£)
+
+**Safety & Reliability**:
+- ReAct agent recursion limit set to 15 to prevent infinite loops
+- Column name normalization prevents Snowflake case sensitivity errors
 
 ### Available Tools (3 total)
 

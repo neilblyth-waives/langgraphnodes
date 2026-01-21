@@ -418,17 +418,18 @@
 
         // Phase display configuration
         const PHASE_CONFIG = {
-            'routing': { name: 'Routing query', icon: '🎯' },
+            'orchestrator_analysis': { name: 'Analyzing query', icon: '🎯' },
             'gate': { name: 'Validating request', icon: '🛡️' },
             'invoke_agents': { name: 'Running agents', icon: '🤖' },
-            'diagnosis': { name: 'Analyzing results', icon: '🔬' },
-            'recommendation': { name: 'Generating recommendations', icon: '💡' },
+            'orchestrator_review': { name: 'Reviewing results', icon: '🔍' },
+            'requery_agents': { name: 'Re-querying agents', icon: '🔄' },
+            'orchestrator_coordination': { name: 'Coordinating analysis', icon: '🧠' },
             'validation': { name: 'Validating recommendations', icon: '✅' },
             'generate_response': { name: 'Formatting response', icon: '📝' }
         };
 
         // All phases in order for display
-        const PHASE_ORDER = ['routing', 'gate', 'invoke_agents', 'diagnosis', 'recommendation', 'validation', 'generate_response'];
+        const PHASE_ORDER = ['orchestrator_analysis', 'gate', 'invoke_agents', 'orchestrator_review', 'requery_agents', 'orchestrator_coordination', 'validation', 'generate_response'];
 
         // Check API health on load
         async function checkHealth() {
@@ -585,14 +586,9 @@
             div.id = id;
             div.className = 'message assistant';
 
-            // Create initial stage (routing will start first)
+            // Create empty stages container - first phase will be added when progress event arrives
             div.innerHTML = `
                 <div class="progress-stages" id="${id}-stages">
-                    <div class="progress-stage active" data-phase="routing">
-                        <span class="stage-icon"><span class="spinner"></span></span>
-                        <span class="stage-text">Starting...</span>
-                        <span class="stage-time"></span>
-                    </div>
                 </div>
             `;
             messages.appendChild(div);

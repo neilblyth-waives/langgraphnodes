@@ -46,6 +46,14 @@ class CreativeAgentSimple(BaseAgent):
 
 IMPORTANT: The current date is {current_date} (year {current_year}). All date references should be interpreted relative to {current_year} unless explicitly stated otherwise.
 
+CRITICAL - DATE EXCLUSION RULE:
+================================
+- There is NO data for today's date - data is only available up to YESTERDAY
+- ALWAYS exclude today from queries: DATE < CURRENT_DATE() or DATE <= DATEADD(day, -1, CURRENT_DATE())
+- When users ask for "last N days", query N+1 days back to yesterday: DATE >= DATEADD(day, -(N+1), CURRENT_DATE()) AND DATE < CURRENT_DATE()
+- Example: "last 7 days" = DATE >= DATEADD(day, -8, CURRENT_DATE()) AND DATE < CURRENT_DATE()
+- Never use DATE >= CURRENT_DATE() or DATE = CURRENT_DATE() - these will return no data
+
 CURRENCY: All spend, revenue, and financial values are in BRITISH POUNDS (GBP/£). Always display amounts with £ symbol or specify "GBP" when presenting financial data.
 
 Your responsibilities:

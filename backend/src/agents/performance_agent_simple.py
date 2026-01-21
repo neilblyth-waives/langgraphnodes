@@ -64,19 +64,30 @@ IMPORTANT DATE CONTEXT:
 
 CRITICAL - DATE CALCULATION RULES:
 ===================================
+**MOST IMPORTANT - NO DATA FOR TODAY:**
+- There is NO data for today's date - data is only available up to YESTERDAY
+- ALWAYS exclude today from queries: DATE < CURRENT_DATE() or DATE <= DATEADD(day, -1, CURRENT_DATE())
+- When users ask for "last 7 days", query 8 days back to yesterday: DATE >= DATEADD(day, -8, CURRENT_DATE()) AND DATE < CURRENT_DATE()
+- Never use DATE >= CURRENT_DATE() or DATE = CURRENT_DATE() - these will return no data
+
 When users ask for "last full reporting week" or "last full week Sunday-Saturday":
 - This means the MOST RECENT COMPLETED week (Sunday through Saturday)
 - Example: If today is {current_date}, the last full week is {last_full_week_display}
 - Always use: DATE >= '{last_full_week_start}' AND DATE <= '{last_full_week_end}'
+- Ensure the end date is before today (already handled in calculation above)
 
 When users ask for "this week" or "current week":
 - This means the week that CONTAINS today (may be incomplete)
 - Calculate: Find the Sunday of the current week, use that as start date
-- End date: Use CURRENT_DATE() or today's date
+- End date: Use DATE < CURRENT_DATE() (yesterday, since today has no data)
 
 When users ask for "last week":
 - This means the week BEFORE the current week
 - Calculate: Last full reporting week (as defined above)
+
+When users ask for "last N days":
+- Query N+1 days back to yesterday: DATE >= DATEADD(day, -(N+1), CURRENT_DATE()) AND DATE < CURRENT_DATE()
+- Example: "last 7 days" = DATE >= DATEADD(day, -8, CURRENT_DATE()) AND DATE < CURRENT_DATE()
 
 CURRENCY: All spend, revenue, and financial values are in BRITISH POUNDS (GBP/£). Always display amounts with £ symbol or specify "GBP" when presenting financial data.
 
@@ -213,7 +224,7 @@ EXAMPLE QUERY PATTERNS:
    
    **CRITICAL**: Always use the exact dates {last_full_week_start} to {last_full_week_end} for "last full reporting week"
 
-4. "Daily trend for Quiz" → Time series:
+4. "Daily trend for Quiz" or "last 30 days" → Time series (exclude today):
    SELECT
        DATE,
        SUM(SPEND_GBP) AS DAILY_SPEND,
@@ -221,9 +232,12 @@ EXAMPLE QUERY PATTERNS:
        SUM(CLICKS) AS DAILY_CLICKS
    FROM reports.reporting_revamp.ALL_PERFORMANCE_AGG
    WHERE ADVERTISER = 'Quiz'
-   AND DATE >= DATEADD(day, -30, CURRENT_DATE())
+   AND DATE >= DATEADD(day, -31, CURRENT_DATE())
+   AND DATE < CURRENT_DATE()
    GROUP BY DATE
    ORDER BY DATE DESC
+   
+   **CRITICAL**: Always use DATE < CURRENT_DATE() to exclude today (no data for today)
 
 5. "Top performing IO" → Ranked by ROAS:
    SELECT

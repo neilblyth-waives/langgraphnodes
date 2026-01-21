@@ -1,6 +1,6 @@
 # Recent Changes & Updates
 
-**Last Updated**: 2026-01-15  
+**Last Updated**: 2026-01-21
 **Status**: Current implementation details
 
 **Note**: This document tracks recent changes. For complete system overview, see `COMPLETE_SYSTEM_SUMMARY.md`.
@@ -10,6 +10,237 @@
 ## Overview
 
 This document tracks recent changes and improvements to the DV360 Agent System. For historical context, see `ROUTEFLOW_MIGRATION_COMPLETE.md`.
+
+---
+
+## 🎯 Latest Changes (2026-01-21)
+
+### Conversation History / Memory Context
+
+**Files Modified**: All specialist agents + orchestrator + routing_agent
+
+**Change**: All agents now have access to conversation history for contextual understanding
+
+**Implementation**:
+- Orchestrator fetches conversation history from `session_manager.get_messages()`
+- History is passed to agents via `input_data.context["conversation_history"]`
+- Last 10 messages included (to avoid token limits)
+- Format: `[Previous] user message` and `[Previous Response] assistant response`
+
+**Agents Updated**:
+- ✅ `performance_agent_simple.py`
+- ✅ `audience_agent_simple.py`
+- ✅ `creative_agent_simple.py`
+- ✅ `budget_risk_agent.py`
+- ✅ `routing_agent.py`
+
+**Code Pattern**:
+```python
+# In agent's process() method:
+conversation_history = input_data.context.get("conversation_history", []) if input_data.context else []
+if conversation_history:
+    for msg in conversation_history[-10:]:
+        role = msg.get("role", "")
+        content = msg.get("content", "")
+        if role == "user":
+            messages.append(HumanMessage(content=f"[Previous] {content}"))
+        elif role == "assistant":
+            messages.append(AIMessage(content=f"[Previous Response] {content}"))
+```
+
+**Benefits**:
+- Agents understand follow-up questions
+- Better context for ambiguous queries
+- Enables multi-turn conversations
+
+---
+
+### Enhanced Routing with Conversation Context
+
+**File**: `backend/src/agents/routing_agent.py`
+
+**Change**: Routing agent now uses conversation history to interpret follow-up queries
+
+**Key Improvements**:
+1. **Follow-up Query Handling**: Short queries like "budget", "yes", "that one" are interpreted in conversation context
+2. **Date Range Interpretation**: When user provides dates, router looks at conversation context to determine intent
+3. **Clarification Flow**: Routes to clarification instead of guessing when query is unclear
+
+**New Routing Logic**:
+```
+CONVERSATION HISTORY (recent messages for context):
+- If user's query is short, interpret it in context of previous messages
+- If assistant asked for clarification, user's response answers that question
+- If user provides date ranges, use context to determine agent:
+  * Previous "performance" → performance_diagnosis
+  * Previous "budget" → budget_risk
+  * Previous "audience" → audience_targeting
+  * Previous "creative" → creative_inventory
+  * No context → default to performance_diagnosis
+```
+
+**Clarification Handling**:
+- `AGENTS: NONE` when query is unclear
+- `CONFIDENCE: 0.0` for unclear queries
+- `CLARIFICATION:` line provides helpful question
+- Ignores "None", "N/A", "not needed" clarification values
+
+---
+
+### Orchestrator Clarification Flow
+
+**File**: `backend/src/agents/orchestrator.py`
+
+**Change**: New conditional routing path for clarification requests
+
+**Flow Update**:
+```
+routing → [clarification_needed?]
+    ├─ YES → generate_response (skip all other phases)
+    └─ NO → gate → invoke_agents → ...
+```
+
+**Key Changes**:
+1. `_routing_decision()` checks for `clarification_needed` flag
+2. Clarification skips gate, agents, diagnosis, recommendations
+3. `clarification_message` passed directly to response
+
+**Benefits**:
+- Faster response for unclear queries
+- No wasted agent calls when clarification needed
+- Better user experience
+
+---
+
+### Progress Callbacks
+
+**File**: `backend/src/agents/orchestrator.py`
+
+**Change**: New `invoke_with_progress()` method for real-time progress updates
+
+**API**:
+```python
+async def invoke_with_progress(
+    self,
+    input_data: AgentInput,
+    on_progress: Callable[[str, str, Dict], Awaitable[None]]
+) -> AgentOutput
+```
+
+**Progress Events**:
+- `routing` - started, completed
+- `gate` - started, completed
+- `invoke_agents` - started, running (per agent), completed
+- `diagnosis` - started, completed (or skipped)
+- `recommendation` - started, completed
+- `validation` - started, completed
+- `generate_response` - started, completed
+
+**Usage**: For streaming/SSE endpoints to show real-time progress
+
+---
+
+### Critical Date Handling Rules
+
+**Files Modified**: All agent system prompts + `snowflake_tools.py`
+
+**Change**: Comprehensive date handling rules added to all agents
+
+**Rules**:
+1. **No Data for Today**: Data only available up to YESTERDAY
+2. **Always Exclude Today**: `DATE < CURRENT_DATE()` or `DATE <= DATEADD(day, -1, CURRENT_DATE())`
+3. **"Last N Days"**: Query N+1 days back to yesterday
+   - Example: "last 7 days" = `DATE >= DATEADD(day, -8, CURRENT_DATE()) AND DATE < CURRENT_DATE()`
+4. **"Last Full Reporting Week"**: Dynamic calculation of Sunday-Saturday
+   - Performance agent calculates exact dates dynamically
+
+**Example (Performance Agent)**:
+```python
+# Calculate last full reporting week (Sunday-Saturday)
+days_since_saturday = (now.weekday() + 2) % 7
+last_saturday = now - timedelta(days=days_since_saturday)
+last_sunday = last_saturday - timedelta(days=6)
+```
+
+---
+
+### SQL Column Name Case Sensitivity
+
+**File**: `backend/src/tools/snowflake_tools.py`
+
+**Change**: Added `normalize_sql_column_names()` function to automatically uppercase column names
+
+**Why**: Snowflake is case-sensitive for column names
+
+**Implementation**:
+- Parses SELECT, GROUP BY, ORDER BY clauses
+- Uppercases identifiers while preserving:
+  - Quoted strings ('Quiz')
+  - SQL keywords (SELECT, FROM, WHERE)
+  - Function names (SUM, COUNT, EXTRACT)
+
+**Agent Prompts Updated**:
+- All agents now document: "ALL column names MUST be UPPERCASE"
+- Examples use UPPERCASE: `INSERTION_ORDER`, `SPEND_GBP`, `DATE`
+
+---
+
+### ReAct Agent Recursion Limit
+
+**Files Modified**: All ReAct agents
+
+**Change**: Added `RunnableConfig(recursion_limit=15)` to prevent infinite retry loops
+
+**Code**:
+```python
+from langchain_core.runnables import RunnableConfig
+config = RunnableConfig(recursion_limit=15)
+result = await react_agent.ainvoke({"messages": messages}, config=config)
+```
+
+**Benefits**:
+- Prevents infinite loops when SQL errors occur
+- Graceful failure with error message
+- Better error handling for max iterations
+
+---
+
+### Currency Documentation
+
+**Files Modified**: All agent system prompts
+
+**Change**: Explicit documentation that all financial values are in British Pounds (GBP/£)
+
+**Updated Prompts**:
+```
+CURRENCY: All spend, revenue, and financial values are in BRITISH POUNDS (GBP/£).
+Always display amounts with £ symbol or specify "GBP" when presenting financial data.
+```
+
+**Affected Columns**:
+- `SPEND_GBP` - Daily/total spend in £
+- `TOTAL_REVENUE_GBP_PM` - Revenue in £
+- `BUDGET_AMOUNT` - Budget in £
+- `AVG_DAILY_BUDGET` - Daily budget in £
+
+---
+
+### Follow-up Query Diagnosis Skip
+
+**File**: `backend/src/agents/orchestrator.py`
+
+**Change**: Diagnosis is skipped for follow-up queries (answers to clarification questions)
+
+**Detection**:
+```python
+follow_up_phrases = ["yes i do", "yes", "no", "that one", "the first", "the second", "re run", "point 1"]
+is_follow_up = any(phrase in query.lower() for phrase in follow_up_phrases)
+```
+
+**Benefits**:
+- Faster response for follow-ups
+- Avoids meaningless diagnosis of "yes" or "no"
+- Uses agent response directly as output
 
 ---
 

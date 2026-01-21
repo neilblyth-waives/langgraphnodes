@@ -14,11 +14,9 @@ from .delivery_agent_langgraph import DeliveryAgentLangGraph, delivery_agent_lan
 
 # RouteFlow components
 from .orchestrator import Orchestrator, orchestrator
-from .routing_agent import RoutingAgent, routing_agent
 from .gate_node import GateNode, gate_node
-from .diagnosis_agent import DiagnosisAgent, diagnosis_agent
+from .diagnosis_recommendation_agent import DiagnosisRecommendationAgent, diagnosis_recommendation_agent
 from .early_exit_node import EarlyExitNode, early_exit_node
-from .recommendation_agent import RecommendationAgent, recommendation_agent
 from .validation_agent import ValidationAgent, validation_agent
 
 __all__ = [
@@ -38,16 +36,12 @@ __all__ = [
     # RouteFlow components
     "Orchestrator",
     "orchestrator",
-    "RoutingAgent",
-    "routing_agent",
     "GateNode",
     "gate_node",
-    "DiagnosisAgent",
-    "diagnosis_agent",
+    "DiagnosisRecommendationAgent",
+    "diagnosis_recommendation_agent",
     "EarlyExitNode",
     "early_exit_node",
-    "RecommendationAgent",
-    "recommendation_agent",
     "ValidationAgent",
     "validation_agent",
 ]

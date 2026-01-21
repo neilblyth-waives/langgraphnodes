@@ -1,6 +1,6 @@
 # DV360 Agent System - Complete Summary for Future Agents
 
-**Last Updated**: 2026-01-15
+**Last Updated**: 2026-01-21
 **Status**: ✅ Production Ready - RouteFlow Architecture Fully Operational
 **Primary Coordinator**: Orchestrator (RouteFlow)
 **API Version**: v1
@@ -11,11 +11,13 @@
 
 ### What This System Does
 Multi-agent DV360 (Display & Video 360) analysis system that:
-- Routes user queries to specialist agents using LLM-based intelligent routing
-- Analyzes campaign performance, budget, creative, and audience data from Snowflake
+- Routes user queries to specialist agents using LLM-based intelligent routing with conversation context
+- Analyzes campaign performance, budget, creative, and audience data from Snowflake (GBP currency)
+- Handles follow-up queries naturally using conversation history (last 10 messages)
 - Generates root cause diagnoses across multiple perspectives
 - Provides validated, actionable recommendations
 - Maintains conversation history and learns from past interactions using pgvector
+- Enforces critical date handling rules (no data for today, always exclude current date)
 
 ### Current Production Setup
 ✅ **Active Coordinator**: Orchestrator (RouteFlow) at `backend/src/agents/orchestrator.py`
@@ -108,12 +110,14 @@ Multi-agent DV360 (Display & Video 360) analysis system that:
 
 | Phase | Component | File | Type | Purpose |
 |-------|-----------|------|------|---------|
-| 1 | Routing Agent | `routing_agent.py` | LLM-based | Selects which specialist agents to use |
+| 1 | Routing Agent | `routing_agent.py` | LLM-based + Context | Selects agents using conversation history |
 | 2 | Gate Node | `gate_node.py` | Rule-based | Validates query & routing, applies business rules |
-| 3 | Performance Agent | `performance_agent_langgraph.py` | LangGraph + ReAct | Campaign performance analysis |
+| 3 | Performance Agent | `performance_agent_simple.py` | ReAct + Context | Campaign performance analysis with conversation history |
 | 3 | Delivery Agent | `delivery_agent_langgraph.py` | LangGraph + ReAct | Creative + Audience analysis |
-| 3 | Budget Risk Agent | `budget_risk_agent.py` | ReAct minimal | Budget pacing & risk assessment |
-| 4 | Diagnosis Agent | `diagnosis_agent.py` | LLM-based | Root cause analysis across agent results |
+| 3 | Budget Risk Agent | `budget_risk_agent.py` | ReAct + Context | Budget pacing with conversation history |
+| 3 | Audience Agent | `audience_agent_simple.py` | ReAct + Context | Audience analysis with conversation history |
+| 3 | Creative Agent | `creative_agent_simple.py` | ReAct + Context | Creative analysis with conversation history |
+| 4 | Diagnosis Agent | `diagnosis_agent.py` | LLM-based | Root cause analysis, skips for follow-ups |
 | 5 | Early Exit Node | `early_exit_node.py` | Rule-based | Determines if recommendations needed |
 | 6 | Recommendation Agent | `recommendation_agent.py` | LLM-based | Generates prioritized recommendations |
 | 7 | Validation Agent | `validation_agent.py` | Rule-based | Validates recommendations for conflicts |
@@ -139,6 +143,21 @@ Available Tables:
   - reports.multi_agent.DV360_BUDGETS_QUIZ (budget data)
 
 Schema Documentation: See docs/SNOWFLAKE_SCHEMA_REFERENCE.md
+
+Critical Features:
+  - Auto-normalizes column names to UPPERCASE (Snowflake requirement)
+  - normalize_sql_column_names() function ensures query compatibility
+  - Handles case-sensitivity issues automatically
+
+Date Handling Rules (CRITICAL):
+  - NO DATA FOR TODAY: Data only available up to YESTERDAY
+  - Always exclude today: DATE < CURRENT_DATE()
+  - "Last N days" = query N+1 days back to yesterday
+  - Performance agent calculates "last full reporting week" dynamically
+
+Currency:
+  - All financial values in British Pounds (GBP/£)
+  - Columns: SPEND_GBP, TOTAL_REVENUE_GBP_PM, BUDGET_AMOUNT, AVG_DAILY_BUDGET
 
 Example Usage:
   - Agents build SQL queries based on user query
@@ -449,6 +468,230 @@ ratelimit:{user_id}:minute → Counter (TTL: 60 seconds)
 
 ---
 
+## 💬 Conversation History & Context Management
+
+### Overview
+
+The system maintains conversation context to enable natural follow-up queries and context-aware analysis. All specialist agents receive conversation history, allowing them to understand references like "last 30 days", "that campaign", or "what about the budget?".
+
+### Implementation
+
+**File**: `backend/src/agents/orchestrator.py`
+
+#### 1. Conversation History Retrieval
+
+```python
+async def _get_conversation_history(
+    self,
+    session_id: UUID,
+    limit: int = 10
+) -> List[Dict]:
+    """
+    Retrieves last N messages from session
+
+    Returns: List of message dicts with format:
+    [
+        {"role": "user", "content": "How is Campaign X performing?"},
+        {"role": "assistant", "content": "Campaign X has CTR of 2.5%..."},
+        {"role": "user", "content": "Show me last 30 days"},
+        {"role": "assistant", "content": "For last 30 days..."}
+    ]
+
+    Default: Last 10 messages (5 user + 5 assistant pairs)
+    """
+```
+
+#### 2. Context Formatting for Agents
+
+```python
+def format_conversation_history(messages: List[Dict]) -> str:
+    """
+    Formats conversation history for agent consumption
+
+    Input:
+    [
+        {"role": "user", "content": "How is Campaign X performing?"},
+        {"role": "assistant", "content": "Campaign X has CTR of 2.5%..."}
+    ]
+
+    Output:
+    "[Previous] How is Campaign X performing?
+    [Previous Response] Campaign X has CTR of 2.5%..."
+
+    Used by: Routing Agent, Specialist Agents (Performance, Budget, Audience, Creative)
+    """
+```
+
+#### 3. Passing Context to Agents
+
+```python
+# Orchestrator invokes specialist agents with context
+async def _invoke_agents_node(self, state: OrchestratorState):
+    """
+    Invokes specialist agents in parallel with conversation context
+    """
+    conversation_history = await self._get_conversation_history(
+        state["session_id"]
+    )
+
+    # Prepare input for each agent
+    for agent_name in state["approved_agents"]:
+        agent_input = AgentInput(
+            message=state["query"],
+            session_id=state["session_id"],
+            user_id=state["user_id"],
+            context={
+                "conversation_history": conversation_history,  # KEY ADDITION
+                "routing_confidence": state["routing_confidence"]
+            }
+        )
+
+        # Invoke agent
+        result = await self.specialist_agents[agent_name].invoke(agent_input)
+```
+
+### Agent Usage Patterns
+
+#### Performance Agent Example
+
+```python
+# File: backend/src/agents/performance_agent_simple.py
+
+async def invoke(self, input_data: AgentInput) -> AgentOutput:
+    """
+    Receives conversation history via input_data.context
+    """
+    # Extract conversation history
+    conversation_history = input_data.context.get("conversation_history", [])
+
+    # Format for LLM prompt
+    context_str = format_conversation_history(conversation_history)
+
+    # Build system prompt with context
+    system_prompt = f"""
+    You are a DV360 performance analysis expert.
+
+    === PREVIOUS CONVERSATION ===
+    {context_str}
+
+    === CURRENT QUERY ===
+    {input_data.message}
+
+    Analyze the current query considering the conversation context.
+    If this is a follow-up query (e.g., "show me last 30 days", "what about Campaign Y?"),
+    use the context to understand what the user is referring to.
+
+    CRITICAL DATE RULES:
+    - NO DATA FOR TODAY: Data only available up to YESTERDAY
+    - Always exclude today: DATE < CURRENT_DATE()
+    - "Last N days" = query N+1 days back to yesterday
+
+    All financial values in British Pounds (GBP/£).
+    """
+```
+
+### Routing Agent Context Usage
+
+```python
+# File: backend/src/agents/routing_agent.py
+
+async def route(
+    self,
+    query: str,
+    conversation_history: Optional[List[Dict]] = None
+):
+    """
+    Routing agent uses conversation history to interpret follow-up queries
+    """
+    context_str = format_conversation_history(conversation_history or [])
+
+    prompt = f"""
+    === PREVIOUS CONVERSATION ===
+    {context_str}
+
+    === CURRENT QUERY ===
+    {query}
+
+    If the query is a follow-up (references previous conversation):
+    - Use context to determine which agent(s) are relevant
+    - Example: "show me last 30 days" after performance query → performance_diagnosis
+
+    If the query is ambiguous:
+    - Return AGENTS: NONE with CLARIFICATION: message
+    """
+```
+
+### Follow-up Query Detection
+
+The system recognizes several types of follow-up queries:
+
+1. **Date Range Modifications**
+   - "show me last 30 days"
+   - "what about this week?"
+   - "give me year-to-date"
+
+2. **Entity References**
+   - "what about Campaign Y?" (after discussing Campaign X)
+   - "how about that other one?"
+   - "show me the budget" (after performance query)
+
+3. **Simple Confirmations**
+   - "yes"
+   - "no"
+   - "that one"
+
+### Clarification Flow
+
+When routing agent detects ambiguous queries:
+
+```python
+# Routing agent output
+{
+    "selected_agents": [],
+    "reasoning": "Query lacks specificity",
+    "confidence": 0.0,
+    "clarification_needed": True,
+    "clarification_message": "Which campaign would you like to analyze?"
+}
+
+# Orchestrator checks clarification_needed flag
+def _routing_decision(self, state: OrchestratorState) -> str:
+    if state.get("clarification_needed", False):
+        return "generate_response"  # Skip gate, agents, diagnosis
+    return "gate"
+
+# Response contains clarification message
+final_response = state["clarification_message"]
+```
+
+### Benefits
+
+1. **Natural Conversation Flow**: Users can ask follow-up questions without repeating context
+2. **Reduced Verbosity**: Users don't need to specify campaign names, date ranges repeatedly
+3. **Context-Aware Routing**: Routing agent understands what "show me budget" means based on context
+4. **Intelligent Clarification**: System asks for clarification when needed
+5. **Better User Experience**: Feels like talking to a human analyst
+
+### Example Conversation
+
+```
+User: "How is Campaign TestCampaign performing?"
+System: [Routes to performance_diagnosis]
+Response: "Campaign TestCampaign has CTR of 2.5%, ROAS of 3.2..."
+
+User: "Show me last 30 days"
+System: [Routes to performance_diagnosis, passes conversation history]
+        [Agent understands: user wants 30-day performance for TestCampaign]
+Response: "For last 30 days, Campaign TestCampaign has CTR of 2.3%..."
+
+User: "What about the budget?"
+System: [Routes to budget_risk, passes conversation history]
+        [Agent understands: user wants budget for TestCampaign]
+Response: "Campaign TestCampaign budget: £10,000, spent £7,500 (75%)..."
+```
+
+---
+
 ## 🗄️ Database Configuration
 
 ### PostgreSQL Connection
@@ -570,6 +813,42 @@ async def process(self, input_data: AgentInput) -> AgentOutput:
     2. Invoke graph: await self.graph.ainvoke(initial_state)
     3. Return AgentOutput with response, confidence, metadata
     """
+
+async def invoke_with_progress(
+    self,
+    input_data: AgentInput,
+    progress_callback: Optional[Callable] = None
+) -> AgentOutput:
+    """
+    Enhanced entry point with progress callbacks
+
+    Emits progress events:
+    - routing: Starting agent routing
+    - gate: Validating query and routing
+    - invoke_agents: Executing specialist agents
+    - diagnosis: Analyzing agent results
+    - recommendation: Generating recommendations
+    - validation: Validating recommendations
+    - generate_response: Formatting final response
+
+    Used by streaming/WebSocket endpoints for real-time updates
+    """
+```
+
+**Clarification Flow**:
+```python
+def _routing_decision(self, state: OrchestratorState) -> str:
+    """
+    Conditional routing after routing node
+
+    Checks for clarification_needed flag:
+    - If True: Skip gate, agents, diagnosis, recommendations
+      → Go directly to generate_response with clarification message
+    - If False: Proceed to gate node for normal flow
+    """
+    if state.get("clarification_needed", False):
+        return "generate_response"  # Short-circuit to response
+    return "gate"
 ```
 
 **Specialist Agent Registry**:
@@ -581,51 +860,85 @@ self.specialist_agents = {
 }
 ```
 
-### 2. Performance Agent (LangGraph + ReAct)
-
-**File**: `backend/src/agents/performance_agent_langgraph.py`
-
-**Pattern**: LangGraph StateGraph (7 nodes) with ReAct agent for tool calling
-
-**State**: `PerformanceAgentState` (19 fields)
-
-**Graph Flow**:
-```
-parse_query → [confidence check]
-    ├─ low confidence → ask_clarification → END
-    └─ high confidence → retrieve_memory → react_data_collection →
-                         analyze_data → generate_recommendations →
-                         generate_response → END
-```
-
-**ReAct Agent**:
+**Conversation History Handling**:
 ```python
-async def _react_data_collection_node(self, state: PerformanceAgentState):
-    """
-    Creates ReAct agent that dynamically selects tools
+# Orchestrator retrieves last 10 messages (5 user + 5 assistant pairs)
+conversation_history = await self._get_conversation_history(session_id)
 
-    Tools available:
-    - execute_custom_snowflake_query (dynamic SQL - builds queries based on user needs)
-    - retrieve_relevant_learnings (memory search)
-    - get_session_history (context)
-    """
-    tools = get_performance_agent_tools()
+# Passed to specialist agents via context
+input_data.context["conversation_history"] = conversation_history
 
-    react_agent = create_react_agent(
-        model=self.llm,
-        tools=tools,
-        messages_modifier=SystemMessage(content=system_prompt)
-    )
-
-    messages = [HumanMessage(content=query)]
-    result = await react_agent.ainvoke({"messages": messages})
+# Format: "[Previous] user message" and "[Previous Response] assistant response"
 ```
+
+### 2. Performance Agent (Simple ReAct)
+
+**File**: `backend/src/agents/performance_agent_simple.py`
+
+**Pattern**: Simplified ReAct agent with direct tool calling
 
 **Key Features**:
-- Confidence scoring: 0-1 based on extracted entities (campaign_id, advertiser_id)
-- Conditional clarification: Asks questions if parse_confidence < 0.6
-- Dynamic tool selection: LLM chooses which SQL queries to run
-- Data analysis: LLM analyzes metrics and identifies issues
+- **Conversation History**: Receives last 10 messages via `input_data.context["conversation_history"]`
+- **Follow-up Query Detection**: Recognizes context from previous conversations
+- **Date Handling**: Understands "last N days" queries, calculates "last full reporting week"
+- **Currency**: Returns all financial values in GBP (£)
+
+**Conversation Context Usage**:
+```python
+async def invoke(self, input_data: AgentInput) -> AgentOutput:
+    """
+    Enhanced with conversation history
+
+    1. Retrieves conversation_history from input_data.context
+    2. Formats as "[Previous] user message" and "[Previous Response] assistant response"
+    3. Passes to LLM for context-aware analysis
+    4. Handles follow-up queries: "show me last 30 days", "what about campaign X?"
+    """
+    conversation_history = input_data.context.get("conversation_history", [])
+
+    # Include in system prompt for context
+    system_prompt = f"""
+    You are a DV360 performance analysis expert.
+
+    Previous conversation:
+    {format_conversation_history(conversation_history)}
+
+    Current query: {input_data.message}
+    """
+```
+
+**ReAct Agent with Recursion Limit**:
+```python
+react_agent = create_react_agent(
+    model=self.llm,
+    tools=tools,
+    messages_modifier=SystemMessage(content=system_prompt)
+)
+
+# IMPORTANT: Prevent infinite loops
+config = RunnableConfig(recursion_limit=15)
+
+result = await react_agent.ainvoke(
+    {"messages": messages},
+    config=config
+)
+```
+
+**Tools Available**:
+- `execute_custom_snowflake_query`: Dynamic SQL generation with date filtering
+- `retrieve_relevant_learnings`: Memory search
+- `get_session_history`: Session context
+
+**Date Handling Examples**:
+```python
+# "Show me performance for last 7 days"
+# → Query: WHERE DATE >= DATEADD(day, -8, CURRENT_DATE()) AND DATE < CURRENT_DATE()
+# → Returns data from 8 days ago to yesterday (excluding today)
+
+# "What's the performance this week?"
+# → Calculates last full reporting week (Monday-Sunday)
+# → Excludes current incomplete week
+```
 
 ### 3. Delivery Agent (LangGraph + ReAct)
 
@@ -662,15 +975,39 @@ Correlation:
 
 **File**: `backend/src/agents/budget_risk_agent.py`
 
-**Pattern**: Class-based with minimal ReAct wrapper
+**Pattern**: Simplified ReAct agent with budget-specific logic
 
 **Why Simpler**: Budget analysis is more straightforward (fewer tools, clearer logic)
 
 **Key Features**:
+- **Conversation History**: Receives last 10 messages via `input_data.context["conversation_history"]`
+- **Follow-up Context**: Understands budget-related follow-up queries
+- **Currency**: All budget values in GBP (£)
+- **Date Filtering**: Always excludes today, uses `BUDGET_DATE < CURRENT_DATE()`
 - Budget utilization percentage
 - Pacing status (ahead/behind/on-track)
 - Risk levels (critical/high/medium/low)
 - Days remaining vs spend rate
+
+**Conversation Context Usage**:
+```python
+async def invoke(self, input_data: AgentInput) -> AgentOutput:
+    """
+    Enhanced with conversation history for context-aware budget analysis
+
+    Handles queries like:
+    - "What's the budget status?" (initial query)
+    - "Show me last 30 days" (follow-up with date range)
+    - "What about Campaign X?" (follow-up with different campaign)
+    """
+    conversation_history = input_data.context.get("conversation_history", [])
+```
+
+**ReAct Agent with Recursion Limit**:
+```python
+config = RunnableConfig(recursion_limit=15)
+result = await react_agent.ainvoke({"messages": messages}, config=config)
+```
 
 **Risk Assessment**:
 ```python
@@ -680,23 +1017,52 @@ elif spend_rate > 0.8 * target_rate: risk = "medium"
 else: risk = "low"
 ```
 
+**SQL Date Filtering**:
+```sql
+-- Budget queries ALWAYS exclude today
+SELECT
+    CAMPAIGN_NAME,
+    BUDGET_AMOUNT,
+    SUM(SPEND_GBP) as total_spend
+FROM reports.multi_agent.DV360_BUDGETS_QUIZ
+WHERE BUDGET_DATE < CURRENT_DATE()  -- Exclude today
+GROUP BY CAMPAIGN_NAME, BUDGET_AMOUNT
+```
+
 ### 5. Routing Agent
 
 **File**: `backend/src/agents/routing_agent.py`
 
-**Pattern**: LLM-based with keyword fallback
+**Pattern**: LLM-based with keyword fallback and conversation context awareness
+
+**Key Features**:
+- **Conversation History Aware**: Accepts `conversation_history` parameter
+- **Context-Based Routing**: Interprets follow-up queries using conversation context
+- **Clarification Handling**: Returns `AGENTS: NONE` with `CLARIFICATION:` when query is ambiguous
+- **Date Range Intelligence**: When user provides only date ranges, looks at context to determine agent
 
 **How It Works**:
 ```python
-async def route(self, query: str, session_context: Optional[Dict] = None):
+async def route(
+    self,
+    query: str,
+    conversation_history: Optional[List[Dict]] = None,
+    session_context: Optional[Dict] = None
+):
     """
-    1. Constructs prompt with available agents
-    2. LLM analyzes query intent
-    3. Selects 1-3 agents
-    4. Returns: selected_agents, reasoning, confidence
+    Enhanced routing with conversation context
+
+    1. Analyzes conversation history for context
+    2. Constructs prompt with available agents
+    3. LLM analyzes query intent (considering previous conversation)
+    4. Selects 1-3 agents OR requests clarification
+    5. Returns: selected_agents, reasoning, confidence, clarification_needed
 
     Fallback: If LLM fails, uses keyword matching
     """
+
+    # Format conversation history for context
+    context_str = format_conversation_history(conversation_history)
 
     prompt = f"""
     Available agents:
@@ -704,9 +1070,22 @@ async def route(self, query: str, session_context: Optional[Dict] = None):
     - budget_risk: Budget pacing, spend rate, risk assessment
     - delivery_optimization: Creative performance, audience targeting
 
-    User query: "{query}"
+    Previous conversation:
+    {context_str}
 
-    Select appropriate agents. Format:
+    Current user query: "{query}"
+
+    Analyze the query considering the conversation context.
+
+    If the query is a follow-up (e.g., "show me last 30 days", "what about that campaign?"),
+    use the context to determine which agent(s) to use.
+
+    If the query is ambiguous and you need clarification, respond with:
+    AGENTS: NONE
+    CONFIDENCE: 0.0
+    CLARIFICATION: What specific information are you looking for?
+
+    Otherwise, select appropriate agents. Format:
     AGENTS: agent1, agent2
     REASONING: Brief explanation
     CONFIDENCE: 0.0 to 1.0
@@ -714,6 +1093,29 @@ async def route(self, query: str, session_context: Optional[Dict] = None):
 
     response = self.llm.invoke([HumanMessage(content=prompt)])
     # Parse response
+```
+
+**Clarification Output Format**:
+```python
+{
+    "selected_agents": [],
+    "reasoning": "Query is ambiguous",
+    "confidence": 0.0,
+    "clarification_needed": True,
+    "clarification_message": "Which campaign would you like to analyze?"
+}
+```
+
+**Follow-up Query Handling Examples**:
+```python
+# User: "How is Campaign TestCampaign performing?"
+# Routing: performance_diagnosis
+
+# User: "Show me last 30 days"
+# Routing: (looks at context) → performance_diagnosis (same agent as before)
+
+# User: "What about the budget?"
+# Routing: (interprets as follow-up about same campaign) → budget_risk
 ```
 
 **Temperature**: 0.0 (deterministic routing)
@@ -757,13 +1159,47 @@ def validate(query, selected_agents, routing_confidence, user_id):
 
 **File**: `backend/src/agents/diagnosis_agent.py`
 
-**Pattern**: LLM-based analysis
+**Pattern**: LLM-based analysis with follow-up detection
 
 **What It Does**:
 - Analyzes results from multiple specialist agents
 - Identifies root causes (not just symptoms)
 - Finds correlations between findings
 - Assesses overall severity
+- **Skips diagnosis for simple follow-up queries** (e.g., "yes", "no", "that one")
+
+**Follow-up Query Handling**:
+```python
+async def diagnose(
+    self,
+    agent_results: Dict[str, AgentOutput],
+    query: str
+) -> Dict[str, Any]:
+    """
+    Enhanced diagnosis with follow-up detection
+
+    If query is a simple follow-up ("yes", "no", "show me last 30 days"):
+    - Skip full diagnosis
+    - Use agent response directly as output
+    - Return immediately without correlation analysis
+
+    Otherwise:
+    - Perform full root cause analysis
+    - Identify correlations
+    - Assess severity
+    """
+
+    # Detect follow-up queries
+    follow_up_patterns = ["yes", "no", "that one", "show me", "what about"]
+    if any(pattern in query.lower() for pattern in follow_up_patterns):
+        return {
+            "skip_diagnosis": True,
+            "use_agent_response_directly": True
+        }
+
+    # Full diagnosis for complex queries
+    # ... analyze agent results ...
+```
 
 **Example**:
 ```
@@ -849,6 +1285,74 @@ CONFIDENCE: 0.85
 Recommendation 1: Increase budget for Campaign A
 Recommendation 3: Decrease overall budget
 → WARNING: Potential conflict detected
+```
+
+### 11. Audience Agent (Simple ReAct)
+
+**File**: `backend/src/agents/audience_agent_simple.py`
+
+**Pattern**: Simplified ReAct agent for audience analysis
+
+**Key Features**:
+- **Conversation History**: Receives last 10 messages via `input_data.context["conversation_history"]`
+- **Follow-up Context**: Understands audience-related follow-up queries
+- **Date Filtering**: Always excludes today, uses `DATE < CURRENT_DATE()`
+- Audience segment performance analysis
+- Demographic and behavioral targeting insights
+- Cross-segment comparison
+
+**Conversation Context Usage**:
+```python
+async def invoke(self, input_data: AgentInput) -> AgentOutput:
+    """
+    Enhanced with conversation history
+
+    Handles queries like:
+    - "How are our audience segments performing?"
+    - "Show me last 30 days" (follow-up with date range)
+    - "What about segment X?" (follow-up with different segment)
+    """
+    conversation_history = input_data.context.get("conversation_history", [])
+```
+
+**ReAct Agent with Recursion Limit**:
+```python
+config = RunnableConfig(recursion_limit=15)
+result = await react_agent.ainvoke({"messages": messages}, config=config)
+```
+
+### 12. Creative Agent (Simple ReAct)
+
+**File**: `backend/src/agents/creative_agent_simple.py`
+
+**Pattern**: Simplified ReAct agent for creative analysis
+
+**Key Features**:
+- **Conversation History**: Receives last 10 messages via `input_data.context["conversation_history"]`
+- **Follow-up Context**: Understands creative-related follow-up queries
+- **Date Filtering**: Always excludes today, uses `DATE < CURRENT_DATE()`
+- Creative performance metrics (CTR, VTR, engagement)
+- Creative fatigue detection
+- Format and size performance comparison
+
+**Conversation Context Usage**:
+```python
+async def invoke(self, input_data: AgentInput) -> AgentOutput:
+    """
+    Enhanced with conversation history
+
+    Handles queries like:
+    - "Which creatives are performing best?"
+    - "Show me last 30 days" (follow-up with date range)
+    - "What about creative ID 123?" (follow-up with specific creative)
+    """
+    conversation_history = input_data.context.get("conversation_history", [])
+```
+
+**ReAct Agent with Recursion Limit**:
+```python
+config = RunnableConfig(recursion_limit=15)
+result = await react_agent.ainvoke({"messages": messages}, config=config)
 ```
 
 ---
@@ -1486,6 +1990,97 @@ def query_competitor_data(campaign_id: str) -> str:
 - **Modify validation**: `agents/gate_node.py`, `agents/validation_agent.py`
 - **Update API**: `api/routes/chat.py`
 - **Configure**: `.env` file
+
+---
+
+## 🆕 Recent Changes (2026-01-21 Update)
+
+### Conversation History & Memory Context
+
+**All specialist agents now receive conversation history:**
+- Performance Agent (`performance_agent_simple.py`)
+- Budget Risk Agent (`budget_risk_agent.py`)
+- Audience Agent (`audience_agent_simple.py`)
+- Creative Agent (`creative_agent_simple.py`)
+
+**Implementation:**
+- Last 10 messages passed via `input_data.context["conversation_history"]`
+- Format: `[Previous] user message` and `[Previous Response] assistant response`
+- Agents use context to understand follow-up queries
+
+### Enhanced Routing with Conversation Context
+
+**Routing agent improvements:**
+- Accepts `conversation_history` parameter
+- Interprets follow-up queries based on conversation context
+- Handles clarification with `AGENTS: NONE`, `CONFIDENCE: 0.0`, `CLARIFICATION:` line
+- Example: User provides only date range → routing looks at context to determine agent
+
+### Orchestrator Clarification Flow
+
+**New conditional routing path:**
+- `_routing_decision()` checks for `clarification_needed` flag
+- When clarification needed: skips gate, agents, diagnosis, recommendations
+- Goes directly to response with clarification message
+- Improves user experience for ambiguous queries
+
+### Progress Callbacks
+
+**New method for real-time updates:**
+- `invoke_with_progress()` method on orchestrator
+- Emits progress events: `routing`, `gate`, `invoke_agents`, `diagnosis`, `recommendation`, `validation`, `generate_response`
+- Used for streaming/WebSocket endpoints
+
+### Critical Date Handling Rules
+
+**Enforced across all agents:**
+- **NO DATA FOR TODAY**: Data only available up to YESTERDAY
+- Always exclude today: `DATE < CURRENT_DATE()`
+- "Last N days" = query N+1 days back to yesterday
+- Performance agent calculates "last full reporting week" dynamically
+- Budget queries: `BUDGET_DATE < CURRENT_DATE()`
+
+### SQL Column Case Sensitivity
+
+**Snowflake compatibility improvements:**
+- Added `normalize_sql_column_names()` function in `snowflake_tools.py`
+- Snowflake requires UPPERCASE column names
+- Tool auto-normalizes queries before execution
+- Prevents case-sensitivity SQL errors
+
+### ReAct Agent Improvements
+
+**Better error handling:**
+- Added `RunnableConfig(recursion_limit=15)` to all ReAct agents
+- Prevents infinite loops in tool calling
+- Better error handling for max iterations
+- Applied to: Performance, Budget, Audience, Creative agents
+
+### Currency Standardization
+
+**All financial values in British Pounds (GBP/£):**
+- Columns: `SPEND_GBP`, `TOTAL_REVENUE_GBP_PM`, `BUDGET_AMOUNT`, `AVG_DAILY_BUDGET`
+- Agents return currency-formatted values (£1,234.56)
+- Consistent across all specialist agents
+
+### Follow-up Query Handling
+
+**Improved diagnosis for simple queries:**
+- Diagnosis skipped for follow-up queries: "yes", "no", "that one", "show me last 30 days"
+- Uses agent response directly as output
+- Reduces latency and token usage for simple follow-ups
+- Full diagnosis still performed for complex queries
+
+### Active Agents Summary
+
+| Agent | File | Context-Aware | Date Handling | Currency |
+|-------|------|---------------|---------------|----------|
+| Performance | `performance_agent_simple.py` | ✅ | ✅ Excludes today | ✅ GBP |
+| Budget Risk | `budget_risk_agent.py` | ✅ | ✅ Excludes today | ✅ GBP |
+| Audience | `audience_agent_simple.py` | ✅ | ✅ Excludes today | ✅ GBP |
+| Creative | `creative_agent_simple.py` | ✅ | ✅ Excludes today | ✅ GBP |
+| Routing | `routing_agent.py` | ✅ | N/A | N/A |
+| Diagnosis | `diagnosis_agent.py` | ✅ (skips follow-ups) | N/A | N/A |
 
 ---
 

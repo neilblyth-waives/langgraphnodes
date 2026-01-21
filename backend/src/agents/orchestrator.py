@@ -16,12 +16,10 @@ from langgraph.graph import StateGraph, END
 ProgressCallback = Callable[[str, str, Dict[str, Any]], Awaitable[None]]
 
 from .base import BaseAgent
-from .routing_agent import routing_agent
 from .gate_node import gate_node
 from ..memory.session_manager import session_manager
-from .diagnosis_agent import diagnosis_agent
+from .diagnosis_recommendation_agent import diagnosis_recommendation_agent
 from .early_exit_node import early_exit_node
-from .recommendation_agent import recommendation_agent
 from .validation_agent import validation_agent
 
 # Import specialist agents (simplified ReAct versions)
@@ -86,30 +84,125 @@ class Orchestrator(BaseAgent):
         current_date = datetime.now().strftime("%B %Y")
         current_year = datetime.now().year
         
-        return f"""You are the Orchestrator for a DV360 analysis system using RouteFlow architecture.
+        return f"""You are the Orchestrator Coordinator for a DV360 analysis system.
+
+You are responsible for:
+1. Analyzing user queries to understand intent
+2. Deciding which specialist agents to use
+3. Extracting and normalizing query parameters (time periods, dates, filters)
+4. Coordinating agent execution with consistent parameters
+5. Reviewing agent results for consistency
+6. Coordinating diagnosis and recommendations
 
 IMPORTANT: The current date is {current_date} (year {current_year}). All date references should be interpreted relative to {current_year} unless explicitly stated otherwise."""
+
+    def _build_agent_message(
+        self,
+        agent_name: str,
+        user_query: str,
+        strategy: Dict[str, Any],
+        normalized_params: Dict[str, Any]
+    ) -> str:
+        """
+        Build an enhanced message for a specialist agent with explicit orchestrator instructions.
+        
+        This makes it clear to each agent:
+        1. Their role in the coordinated analysis
+        2. What the orchestrator needs from them specifically
+        3. The normalized parameters to use (dates, time periods)
+        4. Whether they're part of a comparison/multi-agent analysis
+        """
+        intent = strategy.get("intent", "")
+        selected_agents = strategy.get("selected_agents", [])
+        comparison_mode = strategy.get("comparison_mode", False)
+        time_period = normalized_params.get("time_period", "")
+        start_date = normalized_params.get("start_date", "")
+        end_date = normalized_params.get("end_date", "")
+        
+        # Build agent role context
+        agent_role_map = {
+            "budget_risk": "budget analysis and pacing assessment",
+            "performance_diagnosis": "campaign performance metrics and ROAS analysis",
+            "audience_targeting": "audience performance and targeting insights",
+            "creative_inventory": "creative effectiveness and inventory analysis",
+            "delivery_optimization": "delivery optimization and pacing analysis"
+        }
+        agent_role = agent_role_map.get(agent_name, "specialized analysis")
+        
+        # Build time period context
+        time_context = ""
+        if start_date and end_date:
+            time_context = f"Query data from {start_date} to {end_date} (inclusive, excluding today's date)."
+        elif time_period:
+            time_context = f"Focus on the time period: {time_period}."
+            if time_period == "current_month":
+                time_context += " Query current month data (excluding today's date)."
+            elif time_period.startswith("last_"):
+                days = time_period.replace("last_", "").replace("_days", "")
+                time_context += f" Query the last {days} days of data (excluding today's date)."
+        
+        # Build coordination context
+        coordination_context = ""
+        if len(selected_agents) > 1:
+            other_agents = [a for a in selected_agents if a != agent_name]
+            coordination_context = f"\n\nCOORDINATED ANALYSIS:\n"
+            coordination_context += f"- You are part of a coordinated analysis involving {len(selected_agents)} agents: {', '.join(selected_agents)}\n"
+            coordination_context += f"- Other agents ({', '.join(other_agents)}) are analyzing different aspects simultaneously\n"
+            coordination_context += f"- Use the EXACT time period and dates specified below to ensure consistency with other agents\n"
+            if comparison_mode:
+                coordination_context += f"- This is a COMPARISON analysis - your results will be compared with other agents' findings\n"
+        
+        # Build the enhanced message
+        enhanced_message = f"""ORCHESTRATOR INSTRUCTION:
+
+You are the {agent_name.replace('_', ' ').title()} agent, specializing in {agent_role}.
+
+ORCHESTRATOR'S INTENT:
+{intent}
+
+YOUR SPECIFIC ROLE:
+- Focus on {agent_role} for the Quiz advertiser
+- Use the normalized parameters provided below to ensure consistency
+- Provide clear, actionable insights relevant to your domain
+{coordination_context}
+NORMALIZED PARAMETERS (USE THESE EXACTLY):
+- Time Period: {time_period}
+- Start Date: {start_date if start_date else 'Not specified - use your domain knowledge'}
+- End Date: {end_date if end_date else 'Not specified - use your domain knowledge'}
+{time_context}
+
+USER'S ORIGINAL QUERY:
+{user_query}
+
+IMPORTANT:
+- Use the dates/time period specified above, not your interpretation of the user's query
+- If dates are provided, use them exactly as specified
+- Remember: There is NO data for today's date - always exclude today from queries
+- Provide a focused analysis on {agent_role} - the orchestrator will coordinate with other agents for the complete picture"""
+        
+        return enhanced_message
 
     def _build_graph(self) -> StateGraph:
         """Build the LangGraph StateGraph."""
         workflow = StateGraph(OrchestratorState)
 
         # Add nodes
-        workflow.add_node("routing", self._routing_node)
+        workflow.add_node("orchestrator_analysis", self._orchestrator_analysis_node)
         workflow.add_node("gate", self._gate_node)
         workflow.add_node("invoke_agents", self._invoke_agents_node)
-        workflow.add_node("diagnosis", self._diagnosis_node)
-        workflow.add_node("recommendation", self._recommendation_node)
+        workflow.add_node("orchestrator_review", self._orchestrator_review_node)
+        workflow.add_node("requery_agents", self._requery_agents_node)
+        workflow.add_node("orchestrator_coordination", self._orchestrator_coordination_node)
         workflow.add_node("validation", self._validation_node)
         workflow.add_node("generate_response", self._generate_response_node)
 
         # Set entry point
-        workflow.set_entry_point("routing")
+        workflow.set_entry_point("orchestrator_analysis")
 
-        # Conditional: routing can go to gate (normal) or generate_response (clarification needed)
+        # Conditional: orchestrator_analysis can go to gate (normal) or generate_response (clarification needed)
         workflow.add_conditional_edges(
-            "routing",
-            self._routing_decision,
+            "orchestrator_analysis",
+            self._orchestrator_analysis_decision,
             {
                 "clarify": "generate_response",  # Skip to response for clarification
                 "proceed": "gate"  # Normal flow
@@ -126,111 +219,315 @@ IMPORTANT: The current date is {current_date} (year {current_year}). All date re
             }
         )
 
-        workflow.add_edge("invoke_agents", "diagnosis")
+        workflow.add_edge("invoke_agents", "orchestrator_review")
 
-        # Conditional: early exit or continue
+        # Conditional: orchestrator_review can loop back (requery) or proceed
         workflow.add_conditional_edges(
-            "diagnosis",
-            self._early_exit_decision,
+            "orchestrator_review",
+            self._review_decision,
             {
-                "exit": "generate_response",
-                "continue": "recommendation"
+                "requery": "requery_agents",  # Loop back to re-query agents
+                "proceed": "orchestrator_coordination"  # Proceed to coordination
             }
         )
 
-        workflow.add_edge("recommendation", "validation")
+        workflow.add_edge("requery_agents", "orchestrator_review")  # Loop back to review
+
+        # Conditional: early exit or continue
+        workflow.add_conditional_edges(
+            "orchestrator_coordination",
+            self._early_exit_decision,
+            {
+                "exit": "generate_response",
+                "continue": "validation"
+            }
+        )
+
         workflow.add_edge("validation", "generate_response")
         workflow.add_edge("generate_response", END)
 
         return workflow.compile()
 
-    def _routing_decision(self, state: OrchestratorState) -> str:
+    def _orchestrator_analysis_decision(self, state: OrchestratorState) -> str:
         """Decision: proceed to gate or skip to clarification response?"""
         if state.get("clarification_needed", False):
-            logger.info("Routing decision: clarification needed, skipping to response")
+            logger.info("Orchestrator analysis: clarification needed, skipping to response")
             return "clarify"
         else:
-            logger.info("Routing decision: proceeding to gate")
+            logger.info("Orchestrator analysis: proceeding to gate")
             return "proceed"
 
-    async def _routing_node(self, state: OrchestratorState) -> Dict[str, Any]:
-        """Route query to appropriate specialist agents."""
+    async def _orchestrator_analysis_node(self, state: OrchestratorState) -> Dict[str, Any]:
+        """
+        Orchestrator analysis: Understand query, decide agents, extract parameters.
+        
+        This node replaces routing and adds parameter extraction/coordination.
+        It can ask for clarification if the query is unclear.
+        """
+        from datetime import datetime, timedelta
+        from langchain_core.messages import SystemMessage, HumanMessage
+        
         query = state["query"]
         session_id = state.get("session_id")
 
-        logger.info("Routing query", query=query[:50])
+        logger.info("Orchestrator analyzing query", query=query[:50])
 
         # Emit progress: started
-        await self._emit_progress("routing", "started", {"message": "Routing query to specialist agents..."})
+        await self._emit_progress("orchestrator_analysis", "started", {
+            "message": "Analyzing query and creating coordinated strategy..."
+        })
 
-        # Fetch recent conversation history for context (excluding current query)
+        # Fetch recent conversation history for context
         conversation_history = []
         if session_id:
             try:
                 messages = await session_manager.get_messages(session_id, limit=10)
-                # Only include history if there are previous messages (not just the current one)
-                # Filter out any messages that match the current query (it might be saved already)
-                if len(messages) > 1:  # More than just the current message
-                    # Exclude messages that match the current query
+                if len(messages) > 1:
                     filtered_messages = [
                         msg for msg in messages
-                        if msg.content != query  # Exclude current query if it's already saved
+                        if msg.content != query
                     ]
                     conversation_history = [
                         {"role": msg.role, "content": msg.content}
                         for msg in filtered_messages
                     ]
-                # If only 1 message exists, it's likely the current query, so no history
-                logger.info("Fetched conversation history", message_count=len(conversation_history), total_messages=len(messages))
+                logger.info("Fetched conversation history", message_count=len(conversation_history))
             except Exception as e:
                 logger.warning("Failed to fetch conversation history", error=str(e))
 
-        # Use routing agent with conversation context
-        routing_result = await routing_agent.route(query, conversation_history=conversation_history)
+        # Build context section
+        context_section = ""
+        if conversation_history:
+            recent_messages = conversation_history[-6:]
+            context_lines = []
+            for msg in recent_messages:
+                role = "User" if msg["role"] == "user" else "Assistant"
+                content = msg["content"][:300] + "..." if len(msg["content"]) > 300 else msg["content"]
+                context_lines.append(f"{role}: {content}")
+            context_section = f"\nCONVERSATION HISTORY:\n{chr(10).join(context_lines)}\n"
 
-        # Check if clarification is needed
-        if routing_result.get("clarification_needed", False):
-            logger.info("Routing requires clarification", query=query[:50])
+        # Build agent descriptions
+        agent_list = []
+        for agent_name, agent in self.specialist_agents.items():
+            agent_list.append(f"- **{agent_name}**: {agent.description if hasattr(agent, 'description') else agent_name}")
+
+        agents_description = "\n".join(agent_list)
+        current_date = datetime.now()
+        current_date_str = current_date.strftime("%B %Y")
+        current_year = current_date.year
+
+        # Build orchestrator analysis prompt
+        analysis_prompt = f"""You are the Orchestrator Coordinator for a DV360 analysis system. Your job is to:
+1. Understand the user's query intent
+2. Decide which specialist agents should handle it
+3. Extract and normalize query parameters (time periods, dates, filters)
+4. Create a coordinated strategy so all agents use consistent parameters
+
+{context_section}
+
+IMPORTANT: The current date is {current_date_str} (year {current_year}). All date references should be interpreted relative to {current_year} unless explicitly stated otherwise.
+
+Available agents:
+{agents_description}
+
+User query: "{query}"
+
+CRITICAL - DATE EXCLUSION RULE:
+- There is NO data for today's date - data is only available up to YESTERDAY
+- When users ask for "last N days", query N+1 days back to yesterday
+- Example: "last 7 days" = DATE >= DATEADD(day, -8, CURRENT_DATE()) AND DATE < CURRENT_DATE()
+- Never use DATE >= CURRENT_DATE() or DATE = CURRENT_DATE()
+
+Your task:
+1. Analyze the query to understand intent
+2. Select appropriate agent(s) - can be multiple if query requires comparison
+3. Extract time period parameters:
+   - "recently" → "last_7_days"
+   - "last week" → calculate last full week (Sunday-Saturday)
+   - "last N days" → "last_N_days" (remember: N+1 days back to yesterday)
+   - "this month" → current month (excluding today)
+   - Specific dates → extract start_date and end_date
+4. Normalize all parameters to ensure consistency across agents
+
+Respond in this exact format:
+
+AGENTS: agent_name_1, agent_name_2 (or NONE if query is truly unclear and you cannot proceed)
+INTENT: Brief description of what user wants to know
+TIME_PERIOD: normalized_time_period (e.g., "last_7_days", "last_30_days", "current_month", "custom")
+START_DATE: YYYY-MM-DD (if specific dates, otherwise leave empty)
+END_DATE: YYYY-MM-DD (if specific dates, otherwise leave empty)
+COMPARISON_MODE: true/false (true if comparing multiple agents/data sources)
+CLARIFICATION: ONLY include this line if the query is truly unclear/ambiguous and you CANNOT proceed. Do NOT include informational notes or warnings here.
+
+CRITICAL: 
+- If you can understand the query and select an agent, DO NOT include CLARIFICATION
+- CLARIFICATION should ONLY be used when the query is so vague/ambiguous that you cannot determine what the user wants
+- Examples that need clarification: "hello", "help", "show me data" (no context), "what's happening" (too vague)
+- Examples that DO NOT need clarification: "Quiz performance last week", "budget status", "show me ROAS" (even if ROAS might not be available, proceed with the query)
+
+Examples:
+- "recently" → TIME_PERIOD: last_7_days, START_DATE: (empty), END_DATE: (empty) [NO CLARIFICATION needed]
+- "last week" → TIME_PERIOD: last_full_week, START_DATE: 2026-01-10, END_DATE: 2026-01-17 [NO CLARIFICATION needed]
+- "Jan 4-17" → TIME_PERIOD: custom, START_DATE: 2026-01-04, END_DATE: 2026-01-17 [NO CLARIFICATION needed]
+- "this month" → TIME_PERIOD: current_month, START_DATE: 2026-01-01, END_DATE: (yesterday) [NO CLARIFICATION needed]
+- "show me ROAS" → AGENTS: performance_diagnosis, proceed even if ROAS might not be available [NO CLARIFICATION needed]
+
+Only include CLARIFICATION if:
+- Query is so vague you cannot determine intent (e.g., "hello", "help", "data")
+- Query is completely ambiguous (e.g., "show me something")
+- You truly cannot proceed without more information
+
+Your analysis:"""
+
+        try:
+            messages = [
+                SystemMessage(content=self.get_system_prompt()),
+                HumanMessage(content=analysis_prompt)
+            ]
+
+            response = self.llm.invoke(messages)
+            response_text = response.content.strip()
+
+            logger.info("Orchestrator analysis response", response_preview=response_text[:200])
+
+            # Parse response
+            selected_agents = []
+            intent = ""
+            time_period = ""
+            start_date = ""
+            end_date = ""
+            comparison_mode = False
+            clarification_message = ""
+
+            for line in response_text.split('\n'):
+                line = line.strip()
+                if line.startswith("AGENTS:"):
+                    agents_part = line.replace("AGENTS:", "").strip()
+                    if agents_part.upper() != "NONE":
+                        selected_agents = [a.strip() for a in agents_part.split(',') if a.strip()]
+                elif line.startswith("INTENT:"):
+                    intent = line.replace("INTENT:", "").strip()
+                elif line.startswith("TIME_PERIOD:"):
+                    time_period = line.replace("TIME_PERIOD:", "").strip()
+                elif line.startswith("START_DATE:"):
+                    start_date = line.replace("START_DATE:", "").strip()
+                elif line.startswith("END_DATE:"):
+                    end_date = line.replace("END_DATE:", "").strip()
+                elif line.startswith("COMPARISON_MODE:"):
+                    comparison_mode = line.replace("COMPARISON_MODE:", "").strip().lower() == "true"
+                elif line.startswith("CLARIFICATION:"):
+                    clarification_message = line.replace("CLARIFICATION:", "").strip()
+
+            # Check if clarification is needed
+            # Only clarify if NO agents were selected (query is truly unclear)
+            # If agents were selected, proceed even if clarification message exists (it's just informational)
+            needs_clarification = not selected_agents
             
-            await self._emit_progress("routing", "completed", {
-                "message": "Query unclear - requesting clarification",
-                "clarification_needed": True
+            if needs_clarification:
+                logger.info("Orchestrator analysis: clarification needed - no agents selected", query=query[:50])
+                
+                await self._emit_progress("orchestrator_analysis", "completed", {
+                    "message": "Query unclear - requesting clarification",
+                    "clarification_needed": True
+                })
+
+                return {
+                    "strategy": {},
+                    "analysis_result": {
+                        "intent": intent,
+                        "selected_agents": [],
+                        "confidence": 0.0
+                    },
+                    "selected_agents": [],
+                    "normalized_params": {},
+                    "clarification_needed": True,
+                    "clarification_message": clarification_message or "Could you please clarify what information you need? For example: 'Show me Quiz performance for last week' or 'What's the budget status for January?'",
+                    "conversation_history": conversation_history,
+                    "reasoning_steps": [
+                        "Orchestrator analysis: Query unclear, requesting clarification"
+                    ]
+                }
+            
+            # If agents were selected but clarification message exists, log it as informational only
+            if clarification_message and selected_agents:
+                logger.info(
+                    "Orchestrator analysis: agents selected, clarification message ignored (informational only)",
+                    agents=selected_agents,
+                    clarification_note=clarification_message[:100]
+                )
+
+            # Calculate dates if needed
+            normalized_params = {
+                "time_period": time_period,
+                "comparison_mode": comparison_mode
+            }
+
+            if start_date:
+                normalized_params["start_date"] = start_date
+            if end_date:
+                normalized_params["end_date"] = end_date
+
+            # Calculate dates for relative time periods
+            if time_period == "last_7_days":
+                end_date_obj = current_date - timedelta(days=1)  # Yesterday
+                start_date_obj = end_date_obj - timedelta(days=7)  # 8 days back
+                normalized_params["start_date"] = start_date_obj.strftime("%Y-%m-%d")
+                normalized_params["end_date"] = end_date_obj.strftime("%Y-%m-%d")
+            elif time_period == "last_30_days":
+                end_date_obj = current_date - timedelta(days=1)
+                start_date_obj = end_date_obj - timedelta(days=30)
+                normalized_params["start_date"] = start_date_obj.strftime("%Y-%m-%d")
+                normalized_params["end_date"] = end_date_obj.strftime("%Y-%m-%d")
+            elif time_period == "current_month":
+                normalized_params["start_date"] = f"{current_year}-{current_date.month:02d}-01"
+                normalized_params["end_date"] = (current_date - timedelta(days=1)).strftime("%Y-%m-%d")
+
+            # Create strategy
+            strategy = {
+                "selected_agents": selected_agents,
+                "normalized_params": normalized_params,
+                "intent": intent,
+                "comparison_mode": comparison_mode
+            }
+
+            # Emit progress: completed
+            await self._emit_progress("orchestrator_analysis", "completed", {
+                "message": f"Strategy created: {', '.join(selected_agents)}",
+                "agents": selected_agents,
+                "time_period": time_period
             })
 
             return {
-                "routing_decision": routing_result,
-                "routing_confidence": 0.0,
-                "selected_agents": [],
-                "clarification_needed": True,
-                "clarification_message": routing_result.get("clarification_message", "Could you please clarify your question?"),
+                "strategy": strategy,
+                "analysis_result": {
+                    "intent": intent,
+                    "selected_agents": selected_agents,
+                    "confidence": 0.9
+                },
+                "selected_agents": selected_agents,
+                "normalized_params": normalized_params,
+                "clarification_needed": False,
+                "conversation_history": conversation_history,
                 "reasoning_steps": [
-                    "Routing: Query unclear, requesting clarification"
+                    f"Orchestrator analysis: Selected {', '.join(selected_agents)} "
+                    f"with time_period={time_period}, comparison_mode={comparison_mode}"
                 ]
             }
 
-        selected = routing_result.get("selected_agents", [])
-
-        # Emit progress: completed
-        await self._emit_progress("routing", "completed", {
-            "message": f"Selected: {', '.join(selected)}" if selected else "No agents selected",
-            "agents": selected,
-            "confidence": routing_result.get("confidence", 0.0)
-        })
-
-        return {
-            "routing_decision": routing_result,
-            "routing_confidence": routing_result.get("confidence", 0.0),
-            "selected_agents": selected,
-            "clarification_needed": False,
-            "conversation_history": conversation_history,  # Store for later nodes
-            "reasoning_steps": [
-                f"Routing: selected {', '.join(selected)} "
-                f"with confidence {routing_result.get('confidence', 0.0):.2f}"
-            ]
-        }
+        except Exception as e:
+            logger.error("Orchestrator analysis failed", error=str(e))
+            return {
+                "strategy": {},
+                "analysis_result": {"error": str(e)},
+                "selected_agents": [],
+                "normalized_params": {},
+                "clarification_needed": True,
+                "clarification_message": "I encountered an error analyzing your query. Could you please rephrase it?",
+                "reasoning_steps": [f"Orchestrator analysis failed: {str(e)}"]
+            }
 
     async def _gate_node(self, state: OrchestratorState) -> Dict[str, Any]:
-        """Validate routing decision."""
+        """Validate orchestrator's strategy."""
         # Skip gate validation if clarification is needed
         if state.get("clarification_needed", False):
             logger.info("Gate skipped - clarification needed")
@@ -246,18 +543,20 @@ IMPORTANT: The current date is {current_date} (year {current_year}). All date re
         
         query = state["query"]
         selected_agents = state["selected_agents"]
-        routing_confidence = state["routing_confidence"]
+        strategy = state.get("strategy", {})
+        analysis_result = state.get("analysis_result", {})
+        confidence = analysis_result.get("confidence", 0.8)
 
         logger.info("Gate validation", selected_agents=selected_agents)
 
         # Emit progress: started
         await self._emit_progress("gate", "started", {"message": "Validating request..."})
 
-        # Use gate node
+        # Use gate node (validate orchestrator's strategy)
         gate_result = gate_node.validate(
             query=query,
             selected_agents=selected_agents,
-            routing_confidence=routing_confidence,
+            routing_confidence=confidence,  # Use analysis confidence
             user_id=state["user_id"]
         )
 
@@ -331,12 +630,22 @@ IMPORTANT: The current date is {current_date} (year {current_year}). All date re
         agent_results = {}
         agent_errors = {}
 
-        for agent_name in approved_agents:
+        # Create agent input with orchestrator's strategy and normalized parameters
+        strategy = state.get("strategy", {})
+        normalized_params = state.get("normalized_params", {})
+        
+        # Emit progress: all agents starting
+        await self._emit_progress("invoke_agents", "running", {
+            "message": f"Running {len(approved_agents)} agent(s) in parallel...",
+            "agents": approved_agents
+        })
+
+        async def invoke_single_agent(agent_name: str):
+            """Invoke a single agent and return result or error."""
             agent = self.specialist_agents.get(agent_name)
             if not agent:
                 logger.warning(f"Agent {agent_name} not found")
-                agent_errors[agent_name] = "Agent not found"
-                continue
+                return agent_name, None, "Agent not found"
 
             try:
                 # Emit progress: running this agent
@@ -345,20 +654,30 @@ IMPORTANT: The current date is {current_date} (year {current_year}). All date re
                     "current_agent": agent_name
                 })
 
-                # Create agent input with conversation history
+                # Build enhanced message with orchestrator instructions
+                enhanced_message = self._build_agent_message(
+                    agent_name=agent_name,
+                    user_query=query,
+                    strategy=strategy,
+                    normalized_params=normalized_params
+                )
+                
                 agent_input = AgentInput(
-                    message=query,
+                    message=enhanced_message,
                     session_id=session_id,
                     user_id=user_id,
                     context={
                         "conversation_history": conversation_history,
-                        "routing_decision": state.get("routing_decision", {})
+                        "strategy": strategy,  # Full strategy from orchestrator
+                        "normalized_params": normalized_params,  # Normalized parameters for consistency
+                        "comparison_mode": strategy.get("comparison_mode", False),
+                        "orchestrator_intent": strategy.get("intent", ""),  # What the orchestrator is trying to achieve
+                        "selected_agents": strategy.get("selected_agents", [])  # All agents in this analysis
                     }
                 )
 
-                # Invoke agent
+                # Invoke agent (this is async and will run in parallel with others)
                 agent_output = await agent.invoke(agent_input)
-                agent_results[agent_name] = agent_output
 
                 logger.info(f"Agent {agent_name} completed", confidence=agent_output.confidence)
 
@@ -369,9 +688,28 @@ IMPORTANT: The current date is {current_date} (year {current_year}). All date re
                     "confidence": agent_output.confidence
                 })
 
+                return agent_name, agent_output, None
+
             except Exception as e:
                 logger.error(f"Agent {agent_name} failed", error_message=str(e))
-                agent_errors[agent_name] = str(e)
+                return agent_name, None, str(e)
+
+        # Run all agents in parallel using asyncio.gather
+        tasks = [invoke_single_agent(agent_name) for agent_name in approved_agents]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Process results
+        for result in results:
+            if isinstance(result, Exception):
+                # Handle unexpected exceptions
+                logger.error("Unexpected exception in agent invocation", error=str(result))
+                continue
+            
+            agent_name, agent_output, error = result
+            if error:
+                agent_errors[agent_name] = error
+            elif agent_output:
+                agent_results[agent_name] = agent_output
 
         # Emit progress: all agents completed
         await self._emit_progress("invoke_agents", "completed", {
@@ -389,135 +727,375 @@ IMPORTANT: The current date is {current_date} (year {current_year}). All date re
             ]
         }
 
-    async def _diagnosis_node(self, state: OrchestratorState) -> Dict[str, Any]:
-        """Analyze agent results to find root causes."""
+    async def _orchestrator_review_node(self, state: OrchestratorState) -> Dict[str, Any]:
+        """
+        Review agent results for consistency.
+        
+        Checks if agents used consistent time periods and parameters.
+        Can trigger re-query if mismatches detected.
+        """
+        from langchain_core.messages import SystemMessage, HumanMessage
+        
+        agent_results = state["agent_results"]
+        normalized_params = state.get("normalized_params", {})
+        strategy = state.get("strategy", {})
+        requery_count = state.get("requery_count", 0)
+        max_requeries = state.get("max_requeries", 2)
+        
+        logger.info("Orchestrator reviewing agent results", agents=list(agent_results.keys()))
+        
+        # Emit progress: started
+        await self._emit_progress("orchestrator_review", "started", {
+            "message": "Reviewing agent results for consistency..."
+        })
+        
+        # If max retries reached, proceed anyway
+        if requery_count >= max_requeries:
+            logger.warning("Max retries reached, proceeding with current results")
+            return {
+                "review_result": {
+                    "consistent": False,
+                    "requery_needed": False,
+                    "max_retries_reached": True,
+                    "mismatches": []
+                },
+                "reasoning_steps": ["Review: Max retries reached, proceeding"]
+            }
+        
+        # Extract time periods from agent responses
+        expected_time_period = normalized_params.get("time_period", "")
+        expected_start_date = normalized_params.get("start_date", "")
+        expected_end_date = normalized_params.get("end_date", "")
+        
+        agent_time_periods = {}
+        mismatches = []
+        
+        # Use LLM to extract time periods from agent responses
+        review_prompt = f"""You are reviewing agent results for consistency. Extract the time periods used by each agent.
+
+Expected parameters from orchestrator:
+- Time Period: {expected_time_period}
+- Start Date: {expected_start_date}
+- End Date: {expected_end_date}
+
+Agent Results:
+"""
+        
+        for agent_name, output in agent_results.items():
+            response_preview = output.response[:500] if output.response else ""
+            review_prompt += f"\n{agent_name}:\n{response_preview}\n"
+        
+        review_prompt += """
+Extract the time period used by each agent from their responses.
+
+Respond in format:
+AGENT: agent_name
+TIME_PERIOD: extracted_time_period
+START_DATE: YYYY-MM-DD (if mentioned)
+END_DATE: YYYY-MM-DD (if mentioned)
+MATCHES: true/false (does it match expected?)
+
+Your review:"""
+        
+        try:
+            messages = [
+                SystemMessage(content="You are a consistency reviewer for agent results."),
+                HumanMessage(content=review_prompt)
+            ]
+            
+            response = self.llm.invoke(messages)
+            response_text = response.content.strip()
+            
+            # Parse response to extract time periods
+            current_agent = None
+            for line in response_text.split('\n'):
+                line = line.strip()
+                if line.startswith("AGENT:"):
+                    current_agent = line.replace("AGENT:", "").strip()
+                elif line.startswith("TIME_PERIOD:") and current_agent:
+                    agent_time_periods[current_agent] = line.replace("TIME_PERIOD:", "").strip()
+                elif line.startswith("MATCHES:") and current_agent:
+                    matches = line.replace("MATCHES:", "").strip().lower() == "true"
+                    if not matches:
+                        mismatches.append({
+                            "agent": current_agent,
+                            "expected": expected_time_period,
+                            "actual": agent_time_periods.get(current_agent, "unknown")
+                        })
+            
+            # Determine if re-query is needed
+            consistent = len(mismatches) == 0
+            requery_needed = not consistent and requery_count < max_requeries
+            
+            logger.info(
+                "Review complete",
+                consistent=consistent,
+                mismatches=len(mismatches),
+                requery_needed=requery_needed
+            )
+            
+            # Emit progress: completed
+            await self._emit_progress("orchestrator_review", "completed", {
+                "message": f"Review complete: {'consistent' if consistent else 'mismatches detected'}",
+                "consistent": consistent,
+                "mismatches": len(mismatches)
+            })
+            
+            return {
+                "review_result": {
+                    "consistent": consistent,
+                    "requery_needed": requery_needed,
+                    "mismatches": mismatches,
+                    "agent_time_periods": agent_time_periods
+                },
+                "agent_time_periods": agent_time_periods,
+                "reasoning_steps": [
+                    f"Review: {'Consistent' if consistent else f'{len(mismatches)} mismatch(es) detected'}"
+                ]
+            }
+            
+        except Exception as e:
+            logger.error("Review failed", error=str(e))
+            # On error, proceed (don't block)
+            return {
+                "review_result": {
+                    "consistent": True,  # Assume consistent on error
+                    "requery_needed": False,
+                    "mismatches": [],
+                    "error": str(e)
+                },
+                "agent_time_periods": {},
+                "reasoning_steps": [f"Review failed: {str(e)}, proceeding"]
+            }
+    
+    def _review_decision(self, state: OrchestratorState) -> str:
+        """Decision: requery agents or proceed?"""
+        review_result = state.get("review_result", {})
+        requery_needed = review_result.get("requery_needed", False)
+        
+        if requery_needed:
+            logger.info("Review decision: re-query needed")
+            return "requery"
+        else:
+            logger.info("Review decision: proceeding to coordination")
+            return "proceed"
+    
+    async def _requery_agents_node(self, state: OrchestratorState) -> Dict[str, Any]:
+        """
+        Re-query agents with normalized parameters from orchestrator strategy.
+        
+        This node re-invokes agents with explicit parameters to ensure consistency.
+        """
+        gate_result = state.get("gate_result", {})
+        approved_agents = gate_result.get("approved_agents", [])
+        query = state["query"]
+        session_id = state.get("session_id")
+        user_id = state["user_id"]
+        normalized_params = state.get("normalized_params", {})
+        strategy = state.get("strategy", {})
+        requery_count = state.get("requery_count", 0)
+        
+        logger.info("Re-querying agents with normalized parameters", agents=approved_agents, retry=requery_count + 1)
+        
+        # Emit progress: started
+        await self._emit_progress("requery_agents", "started", {
+            "message": f"Re-querying agents with normalized parameters (retry {requery_count + 1})..."
+        })
+        
+        # Fetch conversation history
+        conversation_history = state.get("conversation_history", [])
+        
+        agent_results = {}
+        agent_errors = {}
+        
+        for agent_name in approved_agents:
+            agent = self.specialist_agents.get(agent_name)
+            if not agent:
+                continue
+            
+            try:
+                # Create agent input with explicit normalized parameters
+                # Add instruction to use these parameters
+                enhanced_query = query
+                if normalized_params.get("start_date") and normalized_params.get("end_date"):
+                    enhanced_query = f"{query} (Use dates: {normalized_params['start_date']} to {normalized_params['end_date']})"
+                elif normalized_params.get("time_period"):
+                    enhanced_query = f"{query} (Use time period: {normalized_params['time_period']})"
+                
+                agent_input = AgentInput(
+                    message=enhanced_query,
+                    session_id=session_id,
+                    user_id=user_id,
+                    context={
+                        "conversation_history": conversation_history,
+                        "strategy": strategy,
+                        "normalized_params": normalized_params,
+                        "comparison_mode": strategy.get("comparison_mode", False),
+                        "requery": True,  # Flag that this is a re-query
+                        "requery_count": requery_count + 1
+                    }
+                )
+                
+                agent_output = await agent.invoke(agent_input)
+                agent_results[agent_name] = agent_output
+                
+                logger.info(f"Re-queried agent {agent_name} completed", confidence=agent_output.confidence)
+                
+            except Exception as e:
+                logger.error(f"Re-query agent {agent_name} failed", error_message=str(e))
+                agent_errors[agent_name] = str(e)
+        
+        # Emit progress: completed
+        await self._emit_progress("requery_agents", "completed", {
+            "message": f"Re-queried {len(agent_results)} agent(s)",
+            "agents_invoked": list(agent_results.keys())
+        })
+        
+        return {
+            "agent_results": agent_results,  # Update agent results
+            "agent_errors": agent_errors,
+            "requery_count": requery_count + 1,
+            "reasoning_steps": [
+                f"Re-queried {len(agent_results)} agents with normalized parameters (retry {requery_count + 1})"
+            ]
+        }
+    
+    async def _orchestrator_coordination_node(self, state: OrchestratorState) -> Dict[str, Any]:
+        """
+        Coordinate diagnosis and recommendations.
+        
+        This replaces the old diagnosis_recommendation_node but now receives
+        validated, consistent agent results from the review node.
+        """
         agent_results = state["agent_results"]
         query = state["query"]
         gate_result = state.get("gate_result", {})
         approved_agents = gate_result.get("approved_agents", [])
-
-        # Skip diagnosis for follow-up queries (answers to clarification questions)
+        review_result = state.get("review_result", {})
+        
+        logger.info("Orchestrator coordinating diagnosis and recommendations")
+        
+        # Emit progress: started
+        await self._emit_progress("orchestrator_coordination", "started", {
+            "message": "Coordinating diagnosis and recommendations..."
+        })
+        
+        # Skip coordination for follow-up queries
         follow_up_phrases = ["yes i do", "yes", "no", "that one", "the first", "the second", "re run", "point 1"]
         is_follow_up = any(phrase in query.lower() for phrase in follow_up_phrases)
         
         if is_follow_up and len(approved_agents) == 1:
-            logger.info("Skipping diagnosis for follow-up query", query=query[:50])
-            
-            # Emit progress: skipped
-            await self._emit_progress("diagnosis", "completed", {
-                "message": "Diagnosis skipped (follow-up query)",
-                "skipped": True
-            })
-            
-            # Use agent response directly as diagnosis summary
+            logger.info("Skipping coordination for follow-up query")
             agent_name = approved_agents[0]
             agent_output = agent_results.get(agent_name)
             
-            if agent_output:
-                diagnosis = {
-                    "summary": agent_output.response,
-                    "severity": "low",
-                    "root_causes": [],
-                    "correlations": [],
-                    "issues": [],
-                    "raw_response": None
-                }
-            else:
-                diagnosis = {
-                    "summary": "Query processed successfully",
-                    "severity": "low",
-                    "root_causes": [],
-                    "correlations": [],
-                    "issues": [],
-                    "raw_response": None
-                }
+            diagnosis = {
+                "summary": agent_output.response if agent_output else "Query processed successfully",
+                "severity": "low",
+                "root_causes": [],
+                "correlations": [],
+                "issues": []
+            }
             
             return {
+                "coordination_result": {
+                    "diagnosis": diagnosis,
+                    "recommendations": []
+                },
                 "diagnosis": diagnosis,
+                "recommendations": [],
+                "recommendation_confidence": 0.0,
                 "correlations": [],
                 "severity_assessment": "low",
-                "reasoning_steps": ["Diagnosis skipped: Follow-up query"]
+                "reasoning_steps": ["Coordination skipped: Follow-up query"]
             }
-
-        # Optimization: Skip diagnosis for single-agent informational queries
-        # Diagnosis is valuable for multi-agent scenarios but adds overhead for simple queries
+        
+        # Skip coordination for single-agent informational queries
         if len(approved_agents) == 1 and self._is_informational_query(query):
-            logger.info(
-                "Skipping diagnosis for single-agent informational query",
-                agent=approved_agents[0],
-                query=query[:50]
-            )
-
-            # Emit progress: skipped
-            await self._emit_progress("diagnosis", "completed", {
-                "message": "Diagnosis skipped (informational query)",
-                "skipped": True
-            })
-
-            # Use agent response directly as diagnosis summary
+            logger.info("Skipping coordination for single-agent informational query")
             agent_name = approved_agents[0]
             agent_output = agent_results.get(agent_name)
-
-            if agent_output:
-                diagnosis = {
-                    "summary": agent_output.response,
-                    "severity": "low",
-                    "root_causes": [],
-                    "correlations": [],
-                    "issues": [],
-                    "raw_response": None
-                }
-            else:
-                # Fallback if no agent output
-                diagnosis = {
-                    "summary": "Query processed successfully",
-                    "severity": "low",
-                    "root_causes": [],
-                    "correlations": [],
-                    "issues": [],
-                    "raw_response": None
-                }
-
+            
+            diagnosis = {
+                "summary": agent_output.response if agent_output else "Query processed successfully",
+                "severity": "low",
+                "root_causes": [],
+                "correlations": [],
+                "issues": []
+            }
+            
             return {
+                "coordination_result": {
+                    "diagnosis": diagnosis,
+                    "recommendations": []
+                },
                 "diagnosis": diagnosis,
+                "recommendations": [],
+                "recommendation_confidence": 0.0,
                 "correlations": [],
                 "severity_assessment": "low",
-                "reasoning_steps": [
-                    "Diagnosis skipped: Single-agent informational query"
-                ]
+                "reasoning_steps": ["Coordination skipped: Single-agent informational query"]
             }
-
-        logger.info("Running diagnosis")
-
-        # Emit progress: started
-        await self._emit_progress("diagnosis", "started", {"message": "Analyzing results..."})
-
-        # Get conversation history and gate warnings for context
+        
+        # Use diagnosis_recommendation_agent for multi-agent or complex queries
         conversation_history = state.get("conversation_history", [])
         gate_warnings = gate_result.get("warnings", [])
-
-        # Use diagnosis agent for multi-agent or complex queries
-        diagnosis = await diagnosis_agent.diagnose(
-            agent_results, 
+        strategy = state.get("strategy", {})
+        normalized_params = state.get("normalized_params", {})
+        agent_time_periods = state.get("agent_time_periods", {})
+        requery_count = state.get("requery_count", 0)
+        
+        # Build review context to pass to diagnosis agent
+        review_context = {
+            "consistent": review_result.get("consistent", True),
+            "mismatches": review_result.get("mismatches", []),
+            "requery_count": requery_count,
+            "expected_time_period": normalized_params.get("time_period", ""),
+            "expected_dates": {
+                "start_date": normalized_params.get("start_date", ""),
+                "end_date": normalized_params.get("end_date", "")
+            },
+            "actual_time_periods": agent_time_periods,
+            "comparison_mode": strategy.get("comparison_mode", False)
+        }
+        
+        # Log review findings for coordination
+        if not review_result.get("consistent", True):
+            logger.info(
+                "Coordination with inconsistent results",
+                mismatches=len(review_result.get("mismatches", [])),
+                requery_count=requery_count
+            )
+        
+        result = await diagnosis_recommendation_agent.analyze_and_recommend(
+            agent_results,
             query,
             conversation_history=conversation_history,
-            gate_warnings=gate_warnings
+            gate_warnings=gate_warnings,
+            review_context=review_context  # Pass review findings
         )
-
+        
+        diagnosis = result.get("diagnosis", {})
+        recommendations = result.get("recommendations", [])
+        confidence = result.get("confidence", 0.8)
+        
         # Emit progress: completed
-        await self._emit_progress("diagnosis", "completed", {
-            "message": f"Analysis complete: {diagnosis.get('severity', 'unknown')} severity",
-            "severity": diagnosis.get("severity"),
-            "root_causes_count": len(diagnosis.get("root_causes", []))
+        await self._emit_progress("orchestrator_coordination", "completed", {
+            "message": f"Coordination complete: {len(recommendations)} recommendation(s)",
+            "recommendations_count": len(recommendations),
+            "severity": diagnosis.get("severity")
         })
-
+        
         return {
+            "coordination_result": result,
             "diagnosis": diagnosis,
-            "correlations": diagnosis.get("correlations", []),
-            "severity_assessment": diagnosis.get("severity", "medium"),
+            "recommendations": recommendations,
+            "recommendation_confidence": confidence,
+            "correlations": result.get("correlations", []),
+            "severity_assessment": result.get("severity_assessment", "medium"),
             "reasoning_steps": [
-                f"Diagnosis: {len(diagnosis.get('root_causes', []))} root causes, "
-                f"severity={diagnosis.get('severity')}"
+                f"Coordination: {len(diagnosis.get('root_causes', []))} root causes, "
+                f"{len(recommendations)} recommendations"
             ]
         }
 
@@ -550,8 +1128,9 @@ IMPORTANT: The current date is {current_date} (year {current_year}). All date re
         return any(keyword in query_lower for keyword in informational_keywords)
 
     def _early_exit_decision(self, state: OrchestratorState) -> str:
-        """Decision: exit early or continue to recommendations?"""
+        """Decision: exit early or continue to validation?"""
         diagnosis = state["diagnosis"]
+        recommendations = state.get("recommendations", [])
         agent_results = state["agent_results"]
         query = state["query"]
 
@@ -559,6 +1138,15 @@ IMPORTANT: The current date is {current_date} (year {current_year}). All date re
         exit_decision = early_exit_node.should_exit_early(diagnosis, agent_results, query)
 
         should_exit = exit_decision.get("exit", False)
+        
+        # Also exit early if no recommendations were generated (informational query)
+        if not should_exit and len(recommendations) == 0:
+            # No recommendations means it was likely informational - exit early
+            logger.info("Early exit triggered - no recommendations generated")
+            state["final_response"] = diagnosis.get("summary", "") or exit_decision.get("final_response", "")
+            state["should_exit_early"] = True
+            state["early_exit_reason"] = "Informational query - no recommendations needed"
+            return "exit"
 
         if should_exit:
             logger.info("Early exit triggered", reason=exit_decision.get("reason"))
@@ -568,42 +1156,8 @@ IMPORTANT: The current date is {current_date} (year {current_year}). All date re
             state["early_exit_reason"] = exit_decision.get("reason")
             return "exit"
         else:
-            logger.info("Continuing to recommendations")
+            logger.info("Continuing to validation")
             return "continue"
-
-    async def _recommendation_node(self, state: OrchestratorState) -> Dict[str, Any]:
-        """Generate recommendations."""
-        diagnosis = state["diagnosis"]
-        agent_results = state["agent_results"]
-        query = state["query"]
-
-        logger.info("Generating recommendations")
-
-        # Emit progress: started
-        await self._emit_progress("recommendation", "started", {"message": "Generating recommendations..."})
-
-        # Use recommendation agent
-        rec_result = await recommendation_agent.generate_recommendations(
-            diagnosis, agent_results, query
-        )
-
-        recommendations = rec_result.get("recommendations", [])
-
-        # Emit progress: completed
-        await self._emit_progress("recommendation", "completed", {
-            "message": f"Generated {len(recommendations)} recommendation(s)",
-            "count": len(recommendations),
-            "confidence": rec_result.get("confidence", 0.0)
-        })
-
-        return {
-            "recommendations": recommendations,
-            "recommendation_confidence": rec_result.get("confidence", 0.0),
-            "reasoning_steps": [
-                f"Generated {len(recommendations)} recommendations "
-                f"with confidence {rec_result.get('confidence', 0.0):.2f}"
-            ]
-        }
 
     async def _validation_node(self, state: OrchestratorState) -> Dict[str, Any]:
         """Validate recommendations."""
